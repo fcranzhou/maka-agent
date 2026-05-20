@@ -52,3 +52,30 @@ export type { ToolActivityItem, ChatItem, SessionViewModel } from './materialize
 
 export { AsyncEventQueue } from './async-queue.js';
 export { FakeBackend } from './fake-backend.js';
+
+export {
+  BUILTIN_PRICING,
+  buildPricingLookup,
+  computeCost,
+  getBuiltinPricing,
+  recordLlmCall,
+  recordToolInvocation,
+} from './telemetry/index.js';
+export type {
+  LlmRecorderDeps,
+  PersistedLlmCallRecord,
+  PersistedToolInvocationRecord,
+  TelemetryRepoLite,
+  ToolRecorderDeps,
+} from './telemetry/index.js';
+
+export { BotRegistry, proxiedFetch, testBotChannel } from './bots/index.js';
+export { setActiveProxy, resolveActiveProxy } from './network/active-proxy-state.js';
+export type {
+  BotBridge,
+  BotIncomingMessage,
+  BotPlatform,
+  BotStatus,
+  BotTestResult,
+  SendCapable,
+} from './bots/index.js';

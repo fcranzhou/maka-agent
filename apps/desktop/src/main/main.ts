@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { release as osRelease, arch as osArch } from 'node:os';
 import {
@@ -64,6 +64,7 @@ import {
   requireReadyConnection,
 } from './chat-readiness.js';
 import { createSafeStorageCredentialStore } from './credential-store.js';
+import { resolveOpenPath, type OpenPathResult } from './open-path-guard.js';
 import { buildPersonalizationPromptFragment } from './personalization-prompt.js';
 import { maskAppSettings, preserveSensitivePlaceholders, toSettingsTestResult } from './settings-ipc-helpers.js';
 
@@ -197,6 +198,105 @@ function installApplicationMenu(): void {
   );
 }
 
+/**
+ * Scan `{workspaceRoot}/skills/` for directories that contain a SKILL.md.
+ * Parse the YAML front-matter for `name`, `description`, and `allowed-tools`.
+ * Errors per skill fall through silently so one malformed folder can't blank
+ * the listing.
+ *
+ * `allowed-tools` is intentionally surfaced as "declared/requested" — never
+ * granted — per @kenji's skills-ingestion contract. PermissionEngine remains
+ * the only authority over tool calls.
+ */
+async function listInstalledSkills(root: string): Promise<Array<{
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  declaredTools: string[];
+}>> {
+  const dir = join(root, 'skills');
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: Array<{
+    id: string;
+    name: string;
+    description: string;
+    path: string;
+    declaredTools: string[];
+  }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillPath = join(dir, entry.name);
+    const skillFile = join(skillPath, 'SKILL.md');
+    try {
+      const text = await readFile(skillFile, 'utf8');
+      const { name, description, allowedTools } = parseSkillFrontMatter(text);
+      out.push({
+        id: entry.name,
+        name: name ?? entry.name,
+        description: description ?? '',
+        path: skillPath,
+        declaredTools: allowedTools,
+      });
+    } catch {
+      // Skip directories without a readable SKILL.md.
+    }
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+function parseSkillFrontMatter(text: string): { name?: string; description?: string; allowedTools: string[] } {
+  if (!text.startsWith('---')) return { allowedTools: [] };
+  const close = text.indexOf('\n---', 3);
+  if (close < 0) return { allowedTools: [] };
+  const block = text.slice(3, close);
+  const lines = block.split(/\r?\n/);
+  const result: { name?: string; description?: string; allowedTools: string[] } = { allowedTools: [] };
+  let key: 'name' | 'description' | 'allowed-tools' | null = null;
+  for (const raw of lines) {
+    const match = raw.match(/^(name|description|allowed-tools):\s*(.*)$/);
+    if (match) {
+      key = match[1] as 'name' | 'description' | 'allowed-tools';
+      const value = match[2].trim().replace(/^['"]|['"]$/g, '');
+      if (key === 'allowed-tools') {
+        // Accept either inline `[A, B, C]` or a bare-line list that follows.
+        if (value.startsWith('[') && value.endsWith(']')) {
+          result.allowedTools = value
+            .slice(1, -1)
+            .split(',')
+            .map((token) => token.trim().replace(/^['"]|['"]$/g, ''))
+            .filter(Boolean);
+        }
+      } else if (value) {
+        result[key] = value;
+      }
+      continue;
+    }
+    if (key === 'allowed-tools') {
+      const item = raw.trim().match(/^-\s+(.+)$/);
+      if (item) {
+        result.allowedTools.push(item[1].trim().replace(/^['"]|['"]$/g, ''));
+        continue;
+      }
+    }
+    if (key === 'name' || key === 'description') {
+      if (/^\s+/.test(raw)) {
+        const continuation = raw.trim();
+        if (continuation && !continuation.startsWith('#')) {
+          result[key] = `${result[key] ?? ''} ${continuation}`.trim();
+        }
+      }
+    }
+  }
+  return result;
+}
+
 function registerIpc(): void {
   ipcMain.handle('app:info', () => ({
     appVersion: app.getVersion(),
@@ -208,6 +308,14 @@ function registerIpc(): void {
     osRelease: osRelease(),
     workspacePath: workspaceRoot,
   }));
+  ipcMain.handle('app:openPath', async (_event, key: string): Promise<OpenPathResult> => {
+    const resolved = await resolveOpenPath({ key, workspaceRoot });
+    if (!resolved.ok) return resolved;
+    const error = await shell.openPath(resolved.path);
+    if (error) return { ok: false, reason: 'open-failed' };
+    return { ok: true, opened: resolved.key };
+  });
+  ipcMain.handle('skills:list', async () => listInstalledSkills(workspaceRoot));
   ipcMain.handle('sessions:list', (_event, filter?: SessionListFilter) => runtime.listSessions(filter));
   ipcMain.handle('sessions:create', async (_event, input?: Partial<CreateSessionInput>) => {
     const cwd = input?.cwd ?? process.cwd();

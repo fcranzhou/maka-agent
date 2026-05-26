@@ -189,6 +189,18 @@ button:active {
 }
 
 .maka-session-panel {
+  /* PR-SIDEBAR-IA-0 Phase 2 (xuan msg `47e204f2` + WAWQAQ fixup
+   * `49309559`): grid is now 5 rows. The visible Chats/Pinned/Archived
+   * switcher was removed per WAWQAQ — Pinned/Archived are NOT
+   * sidebar-level tabs. Row order top-to-bottom:
+   *   1. .maka-session-panel-header   — new chat button (auto)
+   *   2. .maka-sidebar-modules        — top-level module nav (auto)
+   *   3. .maka-session-search         — session-name search input (auto, hidden when not sessions)
+   *   4. .maka-session-list           — scroll container (1fr, Phase 1 fix)
+   *   5. .maka-session-panel-footer   — 版本更新 + 设置 (auto)
+   * Hidden rows collapse to 0px so non-Sessions modules show only
+   * header / module-nav / content / footer.
+   */
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -198,6 +210,90 @@ button:active {
   background: transparent;
 }
 
+/* PR-SIDEBAR-IA-0 Phase 2 fixup (xuan `91401163` + kenji `7c320898`):
+ * Search modal shell. Phase 2 renders shell only — no input, no
+ * results. Phase 4 will replace the placeholder body with the real
+ * search UI consuming `window.maka.search.thread()`. */
+.maka-search-modal-backdrop {
+  /* Reuse the existing modal backdrop tokens. The presentational
+   * `.maka-modal-backdrop` class above this block handles dimming
+   * and centering. */
+}
+.maka-search-modal {
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+}
+.maka-search-modal-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.maka-search-modal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.maka-search-modal-close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--foreground-60);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  border-radius: 6px;
+}
+.maka-search-modal-close:hover {
+  background: oklch(from var(--foreground) l c h / 0.04);
+  color: var(--foreground);
+}
+.maka-search-modal-close:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.maka-search-modal-body {
+  display: grid;
+  gap: 8px;
+  padding: 24px 20px 28px;
+  min-height: 200px;
+  align-content: center;
+  text-align: center;
+}
+.maka-search-modal-placeholder {
+  margin: 0;
+  font-size: 14px;
+  color: var(--foreground-80);
+}
+.maka-search-modal-placeholder-detail {
+  margin: 0;
+  font-size: 12px;
+  color: var(--foreground-50);
+}
+
+.maka-sidebar-modules {
+  /* Top-level module nav. Lightweight visual hierarchy per xuan
+   * `47e204f2` #4 + #6: transparent bg, light dividers, no card
+   * stacking. Reuses `.maka-nav-row` styling so module entries
+   * match the existing nav language (accent-tinted selected state). */
+  display: grid;
+  gap: 2px;
+  padding: 4px 8px;
+}
+
+/* PR-SIDEBAR-IA-0 Phase 2 fixup (xuan `71687cc7`): the
+ * `.maka-session-archive-link` style block was removed alongside
+ * the archive link button. Archived/Pinned access will be a
+ * separate, deliberate, lightweight control in a future PR per
+ * kenji `9f683ea8` — not a hidden affordance in this packet. */
+
 .maka-session-panel-header {
   display: grid;
   gap: 8px;
@@ -206,11 +302,13 @@ button:active {
   -webkit-app-region: drag;
 }
 
-.maka-session-filter {
-  display: grid;
-  gap: 2px;
-  padding: 10px 10px 6px;
-}
+/* PR-SIDEBAR-IA-0 Phase 2 fixup v3 (xuan `dce5a6fb` #3): the
+ * `.maka-session-filter` rule was removed alongside the visible
+ * Chats/Pinned/Archived switcher. No consumer remains in
+ * `SessionListPanel`; keeping the rule was dead-style cruft that
+ * would mislead readers grepping for `session-filter`. Future
+ * Pinned/Archived access lands in a separate PR with its own
+ * deliberate styling. */
 
 .maka-session-search {
   /* PR-UI-LAYOUT-8: session-search refresh.
@@ -300,10 +398,26 @@ button:active {
 }
 
 .maka-session-list {
+  /* PR-SIDEBAR-IA-0 Phase 1 (xuan msg `dc790a54`, kenji msg `0f7bb872`):
+   * scroll fix. The previous block layout let the inner `.maka-list-stack`
+   * grow to its natural content height, so `overflow: auto` on the
+   * stack was a no-op — once a workspace had enough sessions, the
+   * list overflowed the parent and the footer (Settings / Update) got
+   * pushed out of view. Defining a grid row template here pins the
+   * title at the top (`auto`) and gives the scroll body the remaining
+   * space (`minmax(0, 1fr)`), at which point the stack's own
+   * `overflow: auto` activates correctly.
+   *
+   * Hard gate: 50+ sessions in a narrow window must still let the
+   * footer stay visible. See the visual-smoke `sidebar-long-sessions`
+   * scenario.
+   */
   min-height: 0;
   position: relative;
   overflow: hidden;
   border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .maka-session-list-title {
@@ -467,6 +581,19 @@ button:active {
 }
 .maka-nav-row[data-active="true"] .maka-nav-icon {
   color: var(--accent);
+}
+
+/* PR-SIDEBAR-IA-0 Phase 2: aria-disabled nav rows render dimmed and
+ * skip hover. Used by the 版本更新 (Update) placeholder until the
+ * real auto-update wiring lands in PR-AUTOUPDATE-0. */
+.maka-nav-row[aria-disabled="true"],
+.maka-nav-row[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.maka-nav-row[aria-disabled="true"]:hover,
+.maka-nav-row[data-disabled="true"]:hover {
+  background: transparent;
 }
 
 .maka-nav-row span:nth-child(2) {

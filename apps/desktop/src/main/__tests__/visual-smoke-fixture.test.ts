@@ -499,6 +499,95 @@ describe('visual smoke fixture mode', () => {
     }
   });
 
+  it('sidebar-search-modal-open shares the 60-session seed and sets searchModalOpen for auto-open (PR-SIDEBAR-IA-0 Phase 2 fixup v3)', async () => {
+    // PR-SIDEBAR-IA-0 Phase 2 fixup v3 (xuan msg `dce5a6fb` #2): the
+    // sidebar-search-modal-open scenario reuses the 60-session seed
+    // so the sidebar behind the modal matches the long-sessions
+    // baseline exactly. The only differentiator from `sidebar-long-
+    // sessions` is `VisualSmokeState.searchModalOpen=true`, which
+    // the renderer reads to call `setSearchModalOpen(true)` before
+    // auto-capture settles, so the SearchModal shell is on screen
+    // in the captured PNG.
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-search-modal-'));
+    try {
+      const fixture = resolveVisualSmokeFixture('sidebar-search-modal-open', false);
+      assert.ok(fixture);
+      await seedVisualSmokeFixture({
+        workspaceRoot,
+        fixture,
+        credentialStore: fakeCredentialStore(),
+        now: 1_700_000_000_000,
+      });
+
+      const state = getVisualSmokeState(fixture);
+      // Modal-open hint is the contract the renderer reads.
+      assert.equal(state?.searchModalOpen, true, 'searchModalOpen must be true so the renderer auto-opens the modal');
+      // Same active session as the long-sessions scenario so the
+      // sidebar behind the modal looks identical to that baseline.
+      assert.equal(state?.activeSessionId, 'visual-smoke-sidebar-long-00');
+
+      // Same 60-session seed actually lands on disk so the sidebar
+      // is fully populated behind the modal.
+      const file = await readFile(
+        join(workspaceRoot, 'sessions', 'visual-smoke-sidebar-long-00', 'session.jsonl'),
+        'utf8',
+      );
+      const header = JSON.parse(file.split('\n')[0]!) as { id: string; status: string };
+      assert.equal(header.id, 'visual-smoke-sidebar-long-00');
+      assert.equal(header.status, 'active');
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('sidebar-long-sessions seed creates 60 sessions for the scroll-fix gate (PR-SIDEBAR-IA-0 Phase 1)', async () => {
+    // PR-SIDEBAR-IA-0 Phase 1 (xuan msg `dc790a54`, kenji `0f7bb872`):
+    // hard gate fixture for sidebar scroll fix. The CSS contract is
+    // verified by screenshot baselines; the fixture itself only needs
+    // to (a) actually seed 60 sessions, (b) make the newest one the
+    // active selection, and (c) keep IDs deterministic.
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-long-'));
+    try {
+      const fixture = resolveVisualSmokeFixture('sidebar-long-sessions', false);
+      assert.ok(fixture);
+      await seedVisualSmokeFixture({
+        workspaceRoot,
+        fixture,
+        credentialStore: fakeCredentialStore(),
+        now: 1_700_000_000_000,
+      });
+
+      const state = getVisualSmokeState(fixture);
+      // Active session is the first (newest by lastMessageAt).
+      assert.equal(state?.activeSessionId, 'visual-smoke-sidebar-long-00');
+
+      // Verify all 60 sessions exist on disk with deterministic IDs +
+      // monotonically decreasing lastMessageAt (newest first).
+      let previousLastMessageAt = Infinity;
+      for (let i = 0; i < 60; i++) {
+        const idSuffix = String(i).padStart(2, '0');
+        const sessionId = 'visual-smoke-sidebar-long-' + idSuffix;
+        const file = await readFile(join(workspaceRoot, 'sessions', sessionId, 'session.jsonl'), 'utf8');
+        const header = JSON.parse(file.split('\n')[0]!) as {
+          id: string;
+          name: string;
+          status: string;
+          lastMessageAt: number;
+        };
+        assert.equal(header.id, sessionId);
+        assert.equal(header.name, '会话 ' + idSuffix);
+        assert.equal(header.status, 'active');
+        assert.ok(
+          header.lastMessageAt < previousLastMessageAt,
+          'sessions must be in descending lastMessageAt order so the newest sorts to the top of the sidebar',
+        );
+        previousLastMessageAt = header.lastMessageAt;
+      }
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   describe('PR-UI-RENDER-3a-smoke — registry-driven artifact preview fixtures (@kenji msg fc9753b9)', () => {
     /**
      * Helper: assert NO renderer-visible field of any artifact

@@ -31,6 +31,7 @@ import {
   type NavSelection,
   PermissionDialog,
   redactSecrets,
+  SearchModal,
   SessionListPanel,
   type SkillEntry,
   ToastProvider,
@@ -155,6 +156,11 @@ function AppShell(props: {
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   const [helpOpen, closeHelp] = useKeyboardHelp();
   const [paletteOpen, openPalette, closePalette] = useCommandPalette();
+  // PR-SIDEBAR-IA-0 Phase 2 fixup (xuan `91401163` + kenji `7c320898`):
+  // Search modal state. Sidebar `搜索` nav row triggers `openSearchModal`;
+  // the modal is shell-only in Phase 2 (no `useThreadSearch` integration
+  // yet — that lands in Phase 4 per xuan `94c7bf0f` "don't half-wire").
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
   const composerRef = useRef<ComposerHandle>(null);
   const activeIdRef = useRef<string | undefined>(undefined);
   const activeStreamingSlot = activeId ? streamingBySession[activeId] : undefined;
@@ -739,6 +745,14 @@ function AppShell(props: {
     }
     if (state.openSettingsSection) {
       openSettingsSection(state.openSettingsSection);
+    }
+    // PR-SIDEBAR-IA-0 Phase 2 fixup v3 (xuan msg `dce5a6fb` #2): when
+    // the fixture sets `searchModalOpen`, auto-open the sidebar
+    // Search modal so the screenshot pipeline captures the modal
+    // shell deterministically. Real users never reach this branch
+    // (visualSmoke.getState returns null without MAKA_VISUAL_SMOKE_FIXTURE).
+    if (state.searchModalOpen) {
+      setSearchModalOpen(true);
     }
     // PR-IR-01: when MAKA_VISUAL_SMOKE_AUTO_CAPTURE is set, snap a
     // screenshot once the fixture has settled and the renderer has
@@ -1474,6 +1488,7 @@ function AppShell(props: {
             onOpenSettings={openSettings}
             onNew={createSession}
             onOpenSkillFolder={() => void openSkillsFolder()}
+            onOpenSearchModal={() => setSearchModalOpen(true)}
             rowActions={{
               onToggleFlag: (sessionId, next) => void flagSession(sessionId, next),
               onArchive: (sessionId) => void archiveSession(sessionId),
@@ -1597,6 +1612,7 @@ function AppShell(props: {
         />
       )}
       {helpOpen && <KeyboardHelpModal onClose={closeHelp} />}
+      <SearchModal open={searchModalOpen} onClose={() => setSearchModalOpen(false)} />
       {paletteOpen && (
         <CommandPalette
           onClose={closePalette}
@@ -1762,13 +1778,22 @@ function readNavSelection(): NavSelection {
   try {
     const raw = localStorage.getItem('maka-nav-selection-v1');
     if (!raw) return { section: 'sessions', filter: 'chats' };
-    const parsed = JSON.parse(raw) as NavSelection;
+    const parsed = JSON.parse(raw) as { section?: string; filter?: string };
+    // PR-SIDEBAR-IA-0 Phase 2 fixup (xuan `94c7bf0f`): fail-closed.
+    // `'search'` was briefly a `NavSelection.section` during the
+    // Phase 2 initial commit; the fixup removes it because `搜索`
+    // is now a modal trigger, not a section. An older localStorage
+    // entry with `{section:'search'}` would otherwise leave the
+    // app stuck on an invalid section. Reject anything that is not
+    // in the current closed-enum.
     if (parsed.section === 'skills') return { section: 'skills' };
+    if (parsed.section === 'automations') return { section: 'automations' };
+    if (parsed.section === 'daily-review') return { section: 'daily-review' };
     if (
       parsed.section === 'sessions' &&
       (parsed.filter === 'chats' || parsed.filter === 'flagged' || parsed.filter === 'archived')
     ) {
-      return parsed;
+      return parsed as NavSelection;
     }
   } catch {
     /* fall through */

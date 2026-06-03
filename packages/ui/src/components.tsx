@@ -349,8 +349,8 @@ export function SessionListPanel(props: {
    * lifecycle behind this callback.
    */
   onOpenSearchModal?(): void;
-  onCreatePlanReminder?(input: PlanReminderDraftInput): void;
-  onUpdatePlanReminder?(id: string, patch: PlanReminderUpdatePatch): void;
+  onCreatePlanReminder?(input: PlanReminderDraftInput): boolean | Promise<boolean> | void | Promise<void>;
+  onUpdatePlanReminder?(id: string, patch: PlanReminderUpdatePatch): boolean | Promise<boolean> | void | Promise<void>;
   onTogglePlanReminder?(id: string, enabled: boolean): void;
   onTriggerPlanReminderNow?(id: string): void;
   onSnoozePlanReminder?(id: string): void;
@@ -512,7 +512,7 @@ export function SessionListPanel(props: {
           type="button"
           onClick={() => selectModule('sessions')}
         >
-          <MessageSquare className="maka-nav-icon" strokeWidth={1.5} />
+          <MessageSquare className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>{MODULE_NAV_LABEL.sessions}</span>
         </button>
         <button
@@ -522,7 +522,7 @@ export function SessionListPanel(props: {
           onClick={() => selectModule('search')}
           aria-haspopup="dialog"
         >
-          <Search className="maka-nav-icon" strokeWidth={1.5} />
+          <Search className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>{MODULE_NAV_LABEL.search}</span>
         </button>
         <button
@@ -533,7 +533,7 @@ export function SessionListPanel(props: {
           onClick={() => selectModule('automations')}
           aria-label={activePlanReminderCount > 0 ? `计划，${activePlanReminderCount} 个未完成提醒` : undefined}
         >
-          <Clock className="maka-nav-icon" strokeWidth={1.5} />
+          <Clock className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>{MODULE_NAV_LABEL.automations}</span>
           {activePlanReminderCount > 0 && (
             <small className="maka-nav-count" aria-hidden="true">{activePlanReminderCount}</small>
@@ -546,7 +546,7 @@ export function SessionListPanel(props: {
           type="button"
           onClick={() => selectModule('skills')}
         >
-          <Sparkles className="maka-nav-icon" strokeWidth={1.5} />
+          <Sparkles className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>{MODULE_NAV_LABEL.skills}</span>
         </button>
         <button
@@ -556,7 +556,7 @@ export function SessionListPanel(props: {
           type="button"
           onClick={() => selectModule('daily-review')}
         >
-          <CalendarDays className="maka-nav-icon" strokeWidth={1.5} />
+          <CalendarDays className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>{MODULE_NAV_LABEL['daily-review']}</span>
         </button>
       </nav>
@@ -648,7 +648,7 @@ export function SessionListPanel(props: {
           onClick={props.onOpenUpdate}
           aria-label="版本信息"
         >
-          <DownloadCloud className="maka-nav-icon" strokeWidth={1.5} />
+          <DownloadCloud className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>版本信息</span>
         </button>
         <button
@@ -656,7 +656,7 @@ export function SessionListPanel(props: {
           type="button"
           onClick={props.onOpenSettings}
         >
-          <Settings className="maka-nav-icon" strokeWidth={1.5} />
+          <Settings className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
           <span>设置</span>
         </button>
         {/*
@@ -1164,8 +1164,8 @@ function DailyReviewTopList(props: { title: string; entries: ReadonlyArray<Daily
 
 function PlanReminderPanel(props: {
   reminders: PlanReminder[];
-  onCreate?(input: PlanReminderDraftInput): void;
-  onUpdate?(id: string, patch: PlanReminderUpdatePatch): void;
+  onCreate?(input: PlanReminderDraftInput): boolean | Promise<boolean> | void | Promise<void>;
+  onUpdate?(id: string, patch: PlanReminderUpdatePatch): boolean | Promise<boolean> | void | Promise<void>;
   onToggle?(id: string, enabled: boolean): void;
   onTriggerNow?(id: string): void;
   onSnooze?(id: string): void;
@@ -1182,6 +1182,7 @@ function PlanReminderPanel(props: {
   const [deliveryPlatform, setDeliveryPlatform] = useState<BotProvider>('telegram');
   const [deliveryChatId, setDeliveryChatId] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [submitPending, setSubmitPending] = useState(false);
   const [listFilter, setListFilter] = useState<PlanReminderListFilter>('all');
   const [listQuery, setListQuery] = useState('');
   const parsedRunAt = Date.parse(runAtLocal);
@@ -1211,6 +1212,7 @@ function PlanReminderPanel(props: {
     now: Date.now(),
   });
   const canCreate = validationMessage === null;
+  const submitDisabled = !canCreate || submitPending;
   const isEditing = editingId !== null;
 
   useEffect(() => {
@@ -1267,9 +1269,9 @@ function PlanReminderPanel(props: {
     setRunAtLocal(toDatetimeLocalValue(planReminderPresetRunAt(preset)));
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canCreate) return;
+    if (submitDisabled) return;
     const input = {
       title: title.trim(),
       note: note.trim(),
@@ -1278,20 +1280,23 @@ function PlanReminderPanel(props: {
       ...(recurrence === 'cron' ? { cronExpression: cronExpression.trim() } : {}),
       delivery,
     };
-    if (editingId) {
-      props.onUpdate?.(editingId, input);
-    } else {
-      props.onCreate?.({
-        ...input,
-        ...(input.note ? { note: input.note } : {}),
-      });
+    setSubmitPending(true);
+    try {
+      const result = editingId
+        ? await props.onUpdate?.(editingId, input)
+        : await props.onCreate?.({
+          ...input,
+          ...(input.note ? { note: input.note } : {}),
+        });
+      if (result !== false) resetForm();
+    } finally {
+      setSubmitPending(false);
     }
-    resetForm();
   }
 
   return (
     <div className="maka-plan-panel">
-      <form className="maka-plan-form" onSubmit={submit}>
+      <form className="maka-plan-form" onSubmit={submit} aria-busy={submitPending ? 'true' : undefined}>
         <div className="maka-plan-form-title">{isEditing ? '编辑提醒' : '新建提醒'}</div>
         <label className="maka-plan-field">
           <span>标题</span>
@@ -1402,9 +1407,9 @@ function PlanReminderPanel(props: {
             {validationMessage}
           </p>
         )}
-        <button className="maka-button maka-plan-submit" type="submit" disabled={!canCreate}>
-          {isEditing ? <Check size={14} strokeWidth={1.75} /> : <Plus size={14} strokeWidth={1.75} />}
-          <span>{isEditing ? '保存提醒' : '创建提醒'}</span>
+        <button className="maka-button maka-plan-submit" type="submit" disabled={submitDisabled}>
+          {isEditing ? <Check size={14} strokeWidth={1.75} aria-hidden="true" /> : <Plus size={14} strokeWidth={1.75} aria-hidden="true" />}
+          <span>{submitPending ? (isEditing ? '保存中…' : '创建中…') : (isEditing ? '保存提醒' : '创建提醒')}</span>
         </button>
         {isEditing && (
           <button className="maka-button secondary maka-plan-submit" type="button" onClick={resetForm}>
@@ -2872,8 +2877,8 @@ export function ChatView(props: {
   onCreateSkillTemplate?(): void;
   onOpenSkill?(skillId: string): void;
   planReminders?: PlanReminder[];
-  onCreatePlanReminder?(input: PlanReminderDraftInput): void;
-  onUpdatePlanReminder?(id: string, patch: PlanReminderUpdatePatch): void;
+  onCreatePlanReminder?(input: PlanReminderDraftInput): boolean | Promise<boolean> | void | Promise<void>;
+  onUpdatePlanReminder?(id: string, patch: PlanReminderUpdatePatch): boolean | Promise<boolean> | void | Promise<void>;
   onTogglePlanReminder?: (id: string, enabled: boolean) => void;
   onTriggerPlanReminderNow?: (id: string) => void;
   onSnoozePlanReminder?: (id: string) => void;
@@ -3070,7 +3075,7 @@ export function ChatView(props: {
         <header className="maka-chat-header">
           <ChatTab title="新建对话" />
           <button className="maka-chat-tab-plus" type="button" aria-label="新建对话" onClick={props.onNew}>
-            <Plus strokeWidth={1.5} />
+            <Plus strokeWidth={1.5} aria-hidden="true" />
           </button>
           <span className="maka-chat-header-spacer" />
           <PermissionModeSwitcher mode="ask" disabled disabledReason="新建对话后再切换模式。" />
@@ -3099,7 +3104,7 @@ export function ChatView(props: {
             : undefined}
         />
         <button className="maka-chat-tab-plus" type="button" aria-label="新建对话" onClick={props.onNew}>
-          <Plus strokeWidth={1.5} />
+          <Plus strokeWidth={1.5} aria-hidden="true" />
         </button>
         <span className="maka-chat-header-spacer" />
         {props.memoryActive && (
@@ -5300,7 +5305,7 @@ function ToolErrorBanner(props: { result: ToolActivityItem['result'] }) {
           aria-label={copied ? '已复制错误信息' : '复制错误信息'}
           onClick={() => void copy()}
         >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
           <span>{copied ? '已复制' : '复制'}</span>
         </button>
       )}

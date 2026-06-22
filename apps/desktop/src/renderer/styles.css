@@ -7541,59 +7541,12 @@ button:active {
   color: var(--warning-text, var(--info-text));
 }
 
-.settingsSwitch {
-  width: 34px;
-  height: 20px;
-  flex: 0 0 auto;
-  border: 0;
-  border-radius: 999px;
-  background: var(--foreground-20);
-  padding: 2px;
-  /* PR-UI-LAYOUT-35: smooth bg transition + focus ring (was
-   * missing — keyboard users couldn't see the switch state
-   * change visually-focused). */
-  transition: background 150ms ease, box-shadow 150ms ease;
-}
-
-.settingsSwitch:hover {
-  background: oklch(from var(--foreground) l c h / 0.28);
-}
-
-.settingsSwitch:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px oklch(from var(--accent) l c h / 0.18);
-}
-
-.settingsSwitch[data-checked="true"]:hover {
-  background: var(--brand-deep-hover);
-}
-
-.settingsSwitch[data-checked="true"]:focus-visible {
-  box-shadow: 0 0 0 3px oklch(from var(--brand-deep) l c h / 0.28);
-}
-
-.settingsSwitch span {
-  width: 16px;
-  height: 16px;
-  display: block;
-  border-radius: 50%;
-  background: var(--background);
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.16);
-  transition: transform 150ms ease;
-}
-
-.settingsSwitch[data-checked="true"] {
-  background: var(--brand-deep);
-}
-
-.settingsSwitch[data-checked="true"] span {
-  transform: translateX(14px);
-}
-
-.settingsSwitch:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
+/* PR-USE-SHADCN-BASE-UI-SWITCH (2026-06-22): the bespoke .settingsSwitch
+   rules were removed because the local `Switch(...)` adapter now renders
+   the shared `BaseUiSwitch` (Base UI Switch.Root) which carries its own
+   Tailwind utility styling (h-5 w-9 track, h-4 w-4 thumb, data-checked
+   bg-primary, focus ring tied to --ring). Same external API shape;
+   ~50 lines of duplicate CSS deleted. */
 
 .settingsFormGrid {
   display: grid;

@@ -96,6 +96,7 @@ import {
   SelectRoot,
   SelectTrigger,
   SelectValue,
+  Switch as BaseUiSwitch,
   Textarea,
   redactSecrets,
   useModalA11y,
@@ -6095,21 +6096,35 @@ function Segmented<T extends string>(props: { value: T; options: Array<[T, strin
   );
 }
 
-function Switch(props: { ariaLabel: string; checked: boolean; onChange(checked: boolean): void; disabled?: boolean; ariaDescribedBy?: string }) {
+/**
+ * PR-USE-SHADCN-BASE-UI-SWITCH — internal adapter that maps the existing
+ * `{ ariaLabel, checked, onChange, disabled, ariaDescribedBy }` callsite
+ * shape onto the shared `BaseUiSwitch` (Base UI `Switch.Root` +
+ * `Switch.Thumb` styled with the project's semantic Tailwind tokens).
+ *
+ * Why an adapter, not a callsite rewrite: 15+ Switch usages across this
+ * 6900-line settings module all use `ariaLabel` / `onChange`. Renaming
+ * every callsite at the same time would conflict with the parallel
+ * Settings polish lanes; the adapter lets us swap the implementation
+ * (now real `[role="switch"]` semantics, real Base UI keyboard/focus
+ * handling, proper data-checked attribute) without touching the
+ * callers.
+ */
+function Switch(props: {
+  ariaLabel: string;
+  checked: boolean;
+  onChange(checked: boolean): void;
+  disabled?: boolean;
+  ariaDescribedBy?: string;
+}) {
   return (
-    <Button
-      className="settingsSwitch"
-      type="button"
-      role="switch"
+    <BaseUiSwitch
       aria-label={props.ariaLabel}
       aria-describedby={props.ariaDescribedBy}
-      aria-checked={props.checked}
-      data-checked={props.checked}
+      checked={props.checked}
       disabled={props.disabled}
-      onClick={() => props.onChange(!props.checked)}
-    >
-      <span />
-    </Button>
+      onCheckedChange={(next) => props.onChange(next)}
+    />
   );
 }
 

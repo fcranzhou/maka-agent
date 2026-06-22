@@ -2733,7 +2733,6 @@ function AppShell() {
             }}
             onOpenSettings={openSettings}
             userLabel={userLabel}
-            onOpenUpdate={() => openSettingsSection('about')}
             onNew={createSession}
             onOpenSearchModal={() => setSearchModalOpen(true)}
             onRefreshPlanReminders={() => refreshPlanReminders({ shouldShowError: isAutomationsSurfaceActive })}

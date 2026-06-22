@@ -360,8 +360,6 @@ export function SessionListPanel(props: {
   userLabel?: string;
   onNew(): void;
   onOpenSkill?(skillId: string): void;
-  /** Opens the local version/build information surface. */
-  onOpenUpdate(): void;
   /**
    * PR-SIDEBAR-IA-0 Phase 2 fixup (xuan `91401163` + `94c7bf0f`):
    * Sidebar `搜索` nav row click handler. Opens a dedicated Search
@@ -395,8 +393,6 @@ export function SessionListPanel(props: {
   // 参考实现 keeps the lower sidebar region as stable chat history
   // even when Skills / Scheduled Tasks are open in the main pane.
   const sessionListTitle = MODULE_NAV_LABEL.sessions;
-  const accountLabel = props.userLabel?.trim() || 'jakevin';
-  const accountInitial = Array.from(accountLabel)[0]?.toUpperCase() ?? 'J';
   // PR-UX-POLISH-1 commit 4 (WAWQAQ msg `e0dbad11` + kenji msg
   // `2844f64f`): in-list `筛选会话` filter input removed. All search
   // capability lives in the top-level `搜索` modal (PR-SEARCH-MODAL-
@@ -634,27 +630,20 @@ export function SessionListPanel(props: {
       </section>
 
       <footer className="maka-session-panel-footer">
+        {/* Maka has no account system — the sidebar footer is a thin
+            settings affordance only. The earlier `.maka-sidebar-account`
+            "Free Plan" widget falsely implied a subscription model and
+            was removed per WAWQAQ msg cad3dec4. About / version info
+            still reachable via Settings → 关于. */}
         <button
-          className="maka-sidebar-account"
-          type="button"
-          onClick={props.onOpenUpdate}
-          aria-label={`账号与版本信息：${accountLabel}`}
-          title="打开账号与版本信息"
-        >
-          <span className="maka-sidebar-account-avatar" aria-hidden="true">{accountInitial}</span>
-          <span className="maka-sidebar-account-copy">
-            <strong>{accountLabel}</strong>
-            <small>Free Plan</small>
-          </span>
-        </button>
-        <button
-          className="maka-sidebar-account-settings"
+          className="maka-sidebar-settings-button"
           type="button"
           onClick={props.onOpenSettings}
           aria-label="设置"
           title="设置"
         >
           <Settings className="maka-nav-icon" strokeWidth={1.5} aria-hidden="true" />
+          <span>设置</span>
         </button>
         {/*
           PR-UX-POLISH-1 commit 4 (WAWQAQ msg `e0dbad11` + kenji

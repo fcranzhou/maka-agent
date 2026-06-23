@@ -42,6 +42,14 @@ export {
   TabsContent as PrimitiveTabsContent,
   TabsPrimitive as PrimitiveTabsPrimitive,
 } from './primitives/tabs.js';
+export {
+  Accordion as PrimitiveAccordion,
+  AccordionItem as PrimitiveAccordionItem,
+  AccordionHeader as PrimitiveAccordionHeader,
+  AccordionTrigger as PrimitiveAccordionTrigger,
+  AccordionPanel as PrimitiveAccordionPanel,
+  AccordionPrimitive as PrimitiveAccordionPrimitive,
+} from './primitives/accordion.js';
 // PR-USE-SHADCN-BASE-UI-BADGE: the canonical shadcn/base-ui Badge primitive
 // (variants: default / destructive / error / info / outline / secondary /
 // success / warning). Aliased to PrimitiveBadge so it doesn't collide with

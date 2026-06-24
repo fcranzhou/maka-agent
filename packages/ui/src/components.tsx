@@ -4545,30 +4545,37 @@ function ChatModelSwitcher(props: {
  */
 const MessageBody = memo(function MessageBody(props: { role: string; text: string; ts?: number }) {
   if (props.role === 'user') {
+    // User turn: the message sits in a tinted, width-capped block aligned to
+    // the right (so the right-anchor reads even for long messages), with a
+    // quiet always-visible time + a copy affordance in a meta row beneath it.
+    // The time is no longer hover-gated (was `opacity: 0` until hover, which
+    // hid it from touch + assistive tech). Copy reuses MessageCopyButton in
+    // `footerStyle`, so it's the same quiet ghost action as the assistant
+    // turn footer's copy (same primitive + `.maka-turn-footer-action`).
     return (
-      <div className="maka-bubble-user">
-        <MessageTimeInline ts={props.ts} position="before" />
-        <span>{props.text}</span>
-      </div>
+      <>
+        <div className="maka-bubble-user">
+          <span>{props.text}</span>
+        </div>
+        <div className="maka-message-meta">
+          {props.ts !== undefined && (
+            <RelativeTime ts={props.ts} className="maka-message-time-inline" />
+          )}
+          <MessageCopyButton text={props.text} footerStyle />
+        </div>
+      </>
     );
   }
+  // Assistant / system body: open prose, no bubble. Per-turn timing lives in
+  // the turn summary; copy + the other actions live in the turn footer.
   return (
     <div className="maka-bubble-assistant maka-bubble-with-actions">
       <Markdown text={props.text} />
-      <MessageTimeInline ts={props.ts} />
     </div>
   );
 });
 
-function MessageTimeInline(props: { ts?: number; position?: 'before' | 'after' }) {
-  if (props.ts === undefined) return null;
-  const positionClass = props.position === 'before'
-    ? 'maka-message-time-inline-before'
-    : 'maka-message-time-inline-after';
-  return <RelativeTime ts={props.ts} className={`maka-message-time-inline ${positionClass}`} />;
-}
-
-function MessageCopyButton(props: { text: string; label?: string }) {
+function MessageCopyButton(props: { text: string; label?: string; footerStyle?: boolean }) {
   const copyFeedback = useClipboardCopyFeedback(1400, { redact: false });
   const copyPhase = copyFeedback.phaseFor('message');
   const copyPending = copyPhase === 'pending';
@@ -4578,7 +4585,17 @@ function MessageCopyButton(props: { text: string; label?: string }) {
     await copyFeedback.copy('message', props.text);
   }
 
-  const baseLabel = props.label ?? '复制消息';
+  // `footerStyle` renders this copy as the SAME quiet ghost action the
+  // assistant turn footer uses (`.maka-turn-footer-action`, also a UiButton
+  // variant="quiet" size="sm" with icon + "复制"). The user-message copy and
+  // the assistant copy then read as one button by construction — same
+  // primitive, same class, same icon metrics — instead of a look-alike
+  // bespoke treatment.
+  const footer = props.footerStyle === true;
+  const visibleLabel = footer ? (props.label ?? '复制') : props.label;
+  const iconSize = footer ? 12 : 14;
+
+  const baseLabel = props.label ?? (footer ? '复制' : '复制消息');
   const actionLabel = copyPhase === 'pending'
     ? '复制中'
     : copyPhase === 'copied'
@@ -4589,9 +4606,9 @@ function MessageCopyButton(props: { text: string; label?: string }) {
   return (
     <UiButton
       type="button"
-      className="maka-message-copy"
+      className={footer ? 'maka-turn-footer-action' : 'maka-message-copy'}
       variant="quiet"
-      size="icon-sm"
+      size={footer ? 'sm' : 'icon-sm'}
       onClick={() => void copy()}
       aria-label={copyPhase ? `${actionLabel} · ${baseLabel}` : baseLabel}
       aria-busy={copyPending ? 'true' : undefined}
@@ -4599,10 +4616,10 @@ function MessageCopyButton(props: { text: string; label?: string }) {
       data-copied={copied}
       data-copy-feedback={copyPhase ?? undefined}
       data-pending={copyPending ? 'true' : undefined}
-      data-labelled={props.label ? 'true' : undefined}
+      data-labelled={(!footer && props.label) ? 'true' : undefined}
     >
-      {copied ? <Check size={14} strokeWidth={2} aria-hidden="true" /> : <Copy size={14} strokeWidth={1.75} aria-hidden="true" />}
-      {props.label && <span>{copyPhase === 'pending' ? '复制中…' : copyPhase === 'failed' ? '复制失败' : copied ? '已复制' : props.label}</span>}
+      {copied ? <Check size={iconSize} strokeWidth={2} aria-hidden="true" /> : <Copy size={iconSize} strokeWidth={footer ? 2 : 1.75} aria-hidden="true" />}
+      {visibleLabel && <span>{copyPhase === 'pending' ? '复制中…' : copyPhase === 'failed' ? '复制失败' : copied ? '已复制' : visibleLabel}</span>}
     </UiButton>
   );
 }
@@ -4859,6 +4876,7 @@ function TurnView(props: {
       {turn.user && (
         <article
           className="maka-message-row message user"
+          aria-label="你发送的消息"
           title={turn.user.ts ? formatAbsoluteTimestamp(turn.user.ts) : undefined}
         >
           <MessageBody role="user" text={turn.user.text} ts={turn.user.ts} />
@@ -4884,6 +4902,7 @@ function TurnView(props: {
         <article
           className="maka-message-row message assistant"
           data-turn-status={turn.status}
+          aria-label="Maka 的回答"
           title={turn.assistant.ts ? formatAbsoluteTimestamp(turn.assistant.ts) : undefined}
         >
           <div className="maka-bubble-assistant-stack">

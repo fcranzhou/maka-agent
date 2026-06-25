@@ -479,6 +479,26 @@ function AppShell() {
     () => buildChatModelChoices(connections),
     [connections],
   );
+  // Home / empty-state composer: which model the next NEW chat starts with.
+  // Null = follow the default connection; a pick overrides it (sticky until
+  // changed) and is forwarded to sessions.create in `send()`. Renderer-only —
+  // it never mutates the persisted Settings · 模型 default.
+  const [pendingNewChatModel, setPendingNewChatModel] = useState<{ llmConnectionSlug: string; model: string } | null>(null);
+  // A pick only stays in effect while it is still an offered choice. If the user
+  // later disables/removes that connection or model, fall back to the default so
+  // the home chip never shows — nor sends — a model that no longer exists.
+  const validPendingNewChatModel =
+    pendingNewChatModel &&
+    chatModelChoices.some(
+      (c) => c.connectionSlug === pendingNewChatModel.llmConnectionSlug && c.model === pendingNewChatModel.model,
+    )
+      ? pendingNewChatModel
+      : null;
+  const defaultConnModel = defaultConnectionEntry?.defaultModel || defaultConnectionEntry?.models?.[0]?.id;
+  const newChatModel = validPendingNewChatModel
+    ?? (defaultConnectionEntry && defaultConnModel
+      ? { llmConnectionSlug: defaultConnectionEntry.slug, model: defaultConnModel }
+      : undefined);
   const activeConnectionLabel = activeSession?.backend === 'fake'
     ? '本地模拟连接'
     : activeConnection?.name ?? activeSession?.llmConnectionSlug;
@@ -1882,6 +1902,9 @@ function AppShell() {
         const session = await window.maka.sessions.create({
           permissionMode: 'ask',
           name: text.slice(0, 42) || '新建对话',
+          ...(validPendingNewChatModel
+            ? { llmConnectionSlug: validPendingNewChatModel.llmConnectionSlug, model: validPendingNewChatModel.model }
+            : {}),
         });
         setNavSelection({ section: 'sessions', filter: 'chats' });
         setActiveId(session.id);
@@ -3035,6 +3058,7 @@ function AppShell() {
                 onImportFolderOutline={importFolderOutlineIntoComposer}
                 modelLabel={
                   activeModelLabel
+                  ?? validPendingNewChatModel?.model
                   ?? activeConnection?.defaultModel
                   ?? activeConnection?.models?.[0]?.id
                   ?? defaultConnectionEntry?.defaultModel
@@ -3047,6 +3071,8 @@ function AppShell() {
                 modelChoices={chatModelChoices}
                 modelChangePending={activeId ? pendingSessionModelBySession[activeId] === true : false}
                 onModelChange={(input) => setSessionModel(input)}
+                newChatModel={newChatModel}
+                onPickNewChatModel={(input) => setPendingNewChatModel(input)}
                 workspacePicker={{
                   label: appInfo ? basenameFromPath(appInfo.projectPath) : undefined,
                   branch: appInfo?.projectGit.branch,

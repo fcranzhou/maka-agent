@@ -14,7 +14,10 @@ import {
   type BackendFactoryContext,
   type PiAgentTransport,
   type SessionStore,
+  type ToolResultArchiveReader,
+  type ToolResultArchiveRecorder,
 } from '@maka/runtime';
+import { createArtifactStore } from '@maka/storage';
 import type { Config } from '../contracts.js';
 import type { HeadlessBackendContext, IsolatedToolExecutor } from '../isolation.js';
 import {
@@ -159,6 +162,56 @@ describe('runHarborCell', () => {
         JSON.parse(await readFile(join(outputDir, HARBOR_CELL_OUTPUT_FILENAME), 'utf8')),
         result.output,
       );
+    });
+  });
+
+  test('env entrypoint records a context budget policy snapshot', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const off = await runHarborCellFromEnv({
+        MAKA_BACKEND: 'fake',
+        MAKA_INSTRUCTION: 'solve with prune off',
+        MAKA_WORKDIR: workspaceDir,
+        MAKA_OUTPUT_DIR: outputDir,
+        MAKA_STORAGE_ROOT: storageRoot,
+        MAKA_CONTEXT_BUDGET: 'off',
+      }, {
+        registerBackends: registerCellBackend,
+      });
+      assert.deepEqual(off.output.contextBudgetPolicy, { enabled: false });
+    });
+
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const on = await runHarborCellFromEnv({
+        MAKA_BACKEND: 'fake',
+        MAKA_INSTRUCTION: 'solve with prune on',
+        MAKA_WORKDIR: workspaceDir,
+        MAKA_OUTPUT_DIR: outputDir,
+        MAKA_STORAGE_ROOT: storageRoot,
+        MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+        MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_TOKENS: '256',
+        MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+        MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE: 'eager',
+      }, {
+        registerBackends: registerCellBackend,
+      });
+      assert.deepEqual(on.output.contextBudgetPolicy, {
+        enabled: true,
+        name: 'harbor-cell-context-budget',
+        staleToolResultPrune: {
+          enabled: true,
+          maxResultEstimatedTokens: 256,
+          minRecentTurnsFull: 2,
+        },
+        archiveRetrieval: {
+          enabled: true,
+          mode: 'eager',
+          maxResults: 3,
+          maxEstimatedTokens: 8192,
+          maxBytes: 1024 * 1024,
+          order: 'newest_first',
+        },
+        minRecentTurns: 2,
+      });
     });
   });
 
@@ -412,6 +465,7 @@ describe('runHarborCell', () => {
           MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MAX_ESTIMATED_TOKENS: '2',
           MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MIN_STEP_NUMBER: '1',
           MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE: 'history_search_gated',
           MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS: '1',
         },
         now: () => 123,
@@ -441,6 +495,7 @@ describe('runHarborCell', () => {
       assert.equal(backendInput.contextBudget?.activeToolResultPrune?.maxCurrentResultEstimatedTokens, 2);
       assert.equal(backendInput.contextBudget?.activeToolResultPrune?.minStepNumber, 1);
       assert.equal(backendInput.contextBudget?.archiveRetrieval?.enabled, true);
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.mode, 'history_search_gated');
       assert.equal(backendInput.contextBudget?.archiveRetrieval?.maxResults, 1);
       assert.ok(backendInput.archiveToolResult, 'expected archive writer');
       assert.ok(backendInput.readToolResultArchive, 'expected archive reader');
@@ -483,6 +538,220 @@ describe('runHarborCell', () => {
       });
       assert.deepEqual(read, { ok: true, serializedResult });
     });
+  });
+
+  test('Harbor ai-sdk backend leaves context budget policy off when explicitly disabled', async () => {
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          MAKA_CONTEXT_BUDGET: 'off',
+          MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+        },
+        now: () => 123,
+        newId: () => 'id',
+      });
+      await register(registry, {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-4o-mini',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        workspaceDir,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const backendInput = (backend as unknown as {
+        input: ReturnType<typeof buildHarborCellContextBudgetBackendOptions>;
+      }).input;
+      assert.equal(backendInput.contextBudget, undefined);
+      assert.equal(backendInput.archiveToolResult, undefined);
+      assert.equal(backendInput.readToolResultArchive, undefined);
+    });
+  });
+
+  test('Harbor context budget env rejects explicit malformed positive integers', async () => {
+    for (const raw of ['abc', '0', '-1', '1x']) {
+      await withDirs(async ({ workspaceDir }) => {
+        const registry = new BackendRegistry();
+        const toolExecutor = fakeToolExecutor();
+
+        await assert.rejects(
+          async () => {
+            const register = buildAiSdkCellBackendRegistration({
+              provider: 'openai',
+              model: 'gpt-4o-mini',
+              env: {
+                OPENAI_API_KEY: 'test-key',
+                MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+                MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS: raw,
+              },
+              now: () => 123,
+              newId: () => 'id',
+            });
+            await register(registry, {
+              config: {
+                id: 'harbor-ai-sdk',
+                backend: 'ai-sdk',
+                llmConnectionSlug: 'openai',
+                model: 'gpt-4o-mini',
+              },
+              task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+              workspaceDir,
+              realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+              toolExecutor,
+            });
+          },
+          new RegExp(`MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS must be a positive integer, got ${JSON.stringify(raw)}`),
+        );
+      });
+    }
+  });
+
+  test('Harbor context budget env rejects explicit malformed numeric knobs', () => {
+    assert.throws(
+      () => buildHarborCellContextBudgetBackendOptions({
+        MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+        MAKA_CONTEXT_HISTORY_BUDGET_TOKENS: '1000x',
+      }),
+      /MAKA_CONTEXT_HISTORY_BUDGET_TOKENS must be a non-negative integer, got "1000x"/,
+    );
+    assert.throws(
+      () => buildHarborCellContextBudgetBackendOptions({
+        MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+        MAKA_CONTEXT_HISTORY_BUDGET_TURNS: '-1',
+      }),
+      /MAKA_CONTEXT_HISTORY_BUDGET_TURNS must be a non-negative integer, got "-1"/,
+    );
+    assert.throws(
+      () => buildHarborCellContextBudgetBackendOptions({
+        MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+        MAKA_CONTEXT_MIN_RECENT_TURNS: '1.5',
+      }),
+      /MAKA_CONTEXT_MIN_RECENT_TURNS must be a non-negative integer, got "1.5"/,
+    );
+    assert.throws(
+      () => buildHarborCellContextBudgetBackendOptions({
+        MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+        MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS: 'old',
+      }),
+      /MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS must be a non-negative integer, got "old"/,
+    );
+  });
+
+  test('Harbor context budget env rejects explicit malformed archive retrieval mode', async () => {
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+
+      await assert.rejects(
+        async () => {
+          const register = buildAiSdkCellBackendRegistration({
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+            env: {
+              OPENAI_API_KEY: 'test-key',
+              MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+              MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE: 'histroy_search_gated',
+            },
+            now: () => 123,
+            newId: () => 'id',
+          });
+          await register(registry, {
+            config: {
+              id: 'harbor-ai-sdk',
+              backend: 'ai-sdk',
+              llmConnectionSlug: 'openai',
+              model: 'gpt-4o-mini',
+            },
+            task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+            workspaceDir,
+            realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+            toolExecutor,
+          });
+        },
+        /MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE must be one of eager, history_search_gated, got "histroy_search_gated"/,
+      );
+    });
+  });
+
+  test('Harbor context budget env keeps unset or blank archive retrieval knobs unspecified', async () => {
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE: '',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS: '',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_ESTIMATED_TOKENS: '',
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_BYTES: '',
+        },
+        now: () => 123,
+        newId: () => 'id',
+      });
+      await register(registry, {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-4o-mini',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        workspaceDir,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const backendInput = (backend as unknown as {
+        input: ReturnType<typeof buildHarborCellContextBudgetBackendOptions>;
+      }).input;
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.mode, undefined);
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.maxResults, undefined);
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.maxEstimatedTokens, undefined);
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.maxBytes, undefined);
+    });
+  });
+
+  test('Harbor context budget env rejects explicit malformed booleans', () => {
+    assert.throws(
+      () => buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'treu' }),
+      /MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE must be a boolean/,
+    );
+    assert.throws(
+      () => buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'onn' }),
+      /MAKA_CONTEXT_ARCHIVE_RETRIEVAL must be a boolean/,
+    );
+  });
+
+  test('Harbor context budget env treats explicit false-like booleans as disabled', () => {
+    assert.equal(
+      buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'false' }).contextBudget,
+      undefined,
+    );
+    assert.equal(
+      buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'off' }).contextBudget,
+      undefined,
+    );
+    assert.deepEqual(
+      buildHarborCellContextBudgetBackendOptions({
+        MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE: 'enabled',
+      }).contextBudget?.activeToolResultPrune,
+      { enabled: true },
+    );
   });
 
   test('Harbor tool builder keeps the six container-native tools non-interactive', () => {
@@ -1001,6 +1270,10 @@ function fakeToolExecutor(): IsolatedToolExecutor {
       return { exitCode: 0, stdout: '', stderr: '' };
     },
   };
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
 }
 
 function backendContext(workspaceDir: string): BackendFactoryContext {

@@ -437,6 +437,8 @@ describe('fixed prompt controller', () => {
       assert.equal(result.events[0]?.eligible, true);
       assert.equal(result.events[0]?.passed, false);
       assert.equal(result.events[0]?.expectedPromptHash, hashSystemPrompt('fixed prompt\n'));
+      if (result.events[0]?.type !== 'task_budget_exhausted') assert.fail('expected budget exhaustion event');
+      assert.equal(result.events[0].runtimeEventsUnavailableReason, 'budget_exhausted_before_cell_output');
       assert.match(await readFile(resultsJsonlPath, 'utf8'), /"type":"task_budget_exhausted"/);
     });
   });
@@ -895,6 +897,59 @@ describe('fixed prompt controller', () => {
     });
   });
 
+  test('records context budget summary in completed task WAL events', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+      const contextBudgetSummary = {
+        diagnosticEvents: 1,
+        enabledEvents: 1,
+        estimatedTokensBefore: 1000,
+        estimatedTokensAfter: 600,
+        keptTurns: 3,
+        droppedTurns: 2,
+        keptEvents: 8,
+        droppedEvents: 5,
+        prunedToolResults: 2,
+        archivePlaceholders: 2,
+        archiveWriteFailures: 0,
+        retrievedArchiveToolResults: 1,
+        retrievedArchiveEstimatedTokens: 120,
+        archiveRetrievalSkipped: 0,
+        archiveRetrievalFailures: 0,
+      };
+      const contextBudgetPolicy = {
+        enabled: true as const,
+        name: 'harbor-cell-context-budget',
+        staleToolResultPrune: { enabled: true, maxResultEstimatedTokens: 2048, minRecentTurnsFull: 2 },
+        minRecentTurns: 2,
+      };
+
+      const result = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        resultsTsvPath: join(dir, 'results.tsv'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        harborRunner: async () => harborOutput({ taskId: 'task-a', contextBudgetPolicy, contextBudgetSummary }),
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      assert.equal(result.events[0]?.type, 'task_completed');
+      if (result.events[0]?.type === 'task_completed') {
+        assert.deepEqual(result.events[0].contextBudgetPolicy, contextBudgetPolicy);
+        assert.deepEqual(result.events[0].contextBudgetSummary, contextBudgetSummary);
+      }
+      const event = JSON.parse((await readFile(resultsJsonlPath, 'utf8')).trimEnd());
+      assert.deepEqual(event.contextBudgetPolicy, contextBudgetPolicy);
+      assert.deepEqual(event.contextBudgetSummary, contextBudgetSummary);
+    });
+  });
+
   test('classifies completed Harbor reward failures as benchmark failures', async () => {
     await withDir(async (dir) => {
       const systemPromptPath = join(dir, 'system_prompt.md');
@@ -1055,6 +1110,8 @@ function harborOutput(input: {
   promptHash?: string;
   omitPromptHash?: boolean;
   tokenSummary?: HarborTaskRunOutput['cell']['tokenSummary'];
+  contextBudgetPolicy?: HarborTaskRunOutput['cell']['contextBudgetPolicy'];
+  contextBudgetSummary?: HarborTaskRunOutput['cell']['contextBudgetSummary'];
 }): HarborTaskRunOutput {
   return {
     harbor: { reward: input.reward ?? 1 },
@@ -1065,6 +1122,8 @@ function harborOutput(input: {
       traceEventsPath: `/logs/${input.taskId}/events.jsonl`,
       ...(input.omitPromptHash ? {} : { promptHash: input.promptHash ?? hashSystemPrompt('fixed prompt\n') }),
       tokenSummary: input.tokenSummary ?? tokenSummary({ input: 1, output: 2, reasoning: 0, total: 3, costUsd: 0.02 }),
+      ...(input.contextBudgetPolicy ? { contextBudgetPolicy: input.contextBudgetPolicy } : {}),
+      ...(input.contextBudgetSummary ? { contextBudgetSummary: input.contextBudgetSummary } : {}),
       toolSummary: {
         providerVisibleToolCount: 0,
         actualToolCalls: 0,

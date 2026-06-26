@@ -1,4 +1,5 @@
 import type { FixedPromptTask, FixedPromptTaskWalEvent } from './fixed-prompt-controller.js';
+import type { HarborCellContextBudgetPolicySnapshot } from './cell-output.js';
 
 export type AbExperimentKind = 'prompt' | 'tools' | 'provider' | 'runtime';
 
@@ -18,6 +19,7 @@ export interface SummarizeAbComparisonInput {
   baselineRuns: readonly (readonly FixedPromptTaskWalEvent[])[];
   candidateRuns: readonly (readonly FixedPromptTaskWalEvent[])[];
   budgetMs?: number;
+  nonInferiorityMargin?: number;
 }
 
 export interface RunAbComparisonInput {
@@ -27,6 +29,7 @@ export interface RunAbComparisonInput {
   reps?: number;
   maxConcurrency?: number;
   budgetMs?: number;
+  nonInferiorityMargin?: number;
   runArm: AbArmRunner;
 }
 
@@ -41,8 +44,8 @@ export interface AbArmRunInput {
 export type AbArmRunner = (input: AbArmRunInput) => Promise<FixedPromptTaskWalEvent>;
 
 export type AbDecision =
-  | 'candidate_better'
-  | 'baseline_better'
+  | 'non_inferior'
+  | 'inferior'
   | 'inconclusive';
 
 export interface AbArmSummary {
@@ -59,6 +62,42 @@ export interface AbArmSummary {
   coverageRate: number;
   totalCostUsd: number;
   meanDurationMs: number | null;
+  tokenCostSummary: AbTokenCostSummary;
+  contextBudgetPolicy?: AbContextBudgetPolicySummary;
+  contextBudget?: AbContextBudgetSummary;
+}
+
+export interface AbTokenCostSummary {
+  input: number;
+  cachedInput: number;
+  cacheHitInput: number;
+  cacheMissInput: number;
+  cacheWriteInput: number;
+  output: number;
+  reasoning: number;
+  total: number;
+  costUsd: number;
+  meanDurationMs: number | null;
+}
+
+export interface AbContextBudgetPolicySummary {
+  attempts: number;
+  enabledAttempts: number;
+  snapshots: HarborCellContextBudgetPolicySnapshot[];
+}
+
+export interface AbContextBudgetSummary {
+  diagnosticAttempts: number;
+  activatedAttempts: number;
+  activatedAttemptIds: string[];
+  diagnosticEvents: number;
+  prunedToolResults: number;
+  archivePlaceholders: number;
+  archiveWriteFailures: number;
+  retrievedArchiveToolResults: number;
+  retrievedArchiveEstimatedTokens: number;
+  archiveRetrievalSkipped: number;
+  archiveRetrievalFailures: number;
 }
 
 export interface AbTaskArmSummary {
@@ -105,6 +144,38 @@ export interface AbAttemptPairSummary {
   infraOrPlumbingDiscordantPairIds: string[];
 }
 
+export type AbArmLabel = 'A' | 'B';
+
+export interface AbAttemptRef {
+  arm: AbArmLabel;
+  attemptId: string;
+  taskId: string;
+  rep: number;
+  roundId: string;
+  runtimeEventsPath?: string;
+  traceEventsPath?: string;
+  runtimeEventsUnavailableReason?: string;
+}
+
+export interface AbPairInvestigationRef {
+  pairId: string;
+  baseline?: AbAttemptRef;
+  candidate?: AbAttemptRef;
+}
+
+export interface AbInvestigationRefs {
+  activatedAttempts: AbAttemptRef[];
+  candidateLosses: AbPairInvestigationRef[];
+  budgetDiscordantPairs: AbPairInvestigationRef[];
+  infraOrPlumbingDiscordantPairs: AbPairInvestigationRef[];
+}
+
+export interface AbNonInferioritySummary {
+  method: 'newcombe_wilson' | 'unavailable';
+  confidenceLevel: number;
+  lowerBound: number | null;
+}
+
 export interface AbComparisonSummary {
   runId: string;
   roundId: string;
@@ -113,12 +184,16 @@ export interface AbComparisonSummary {
   taskCount: number;
   reps: number;
   budgetMs?: number;
+  nonInferiorityMargin: number;
+  passRateDelta: number | null;
+  nonInferiority: AbNonInferioritySummary;
   decision: AbDecision;
   reason: string;
   baseline: AbArmSummary;
   candidate: AbArmSummary;
   taskLevel: AbTaskLevelSummary;
   pairedAttempts: AbAttemptPairSummary;
+  investigationRefs: AbInvestigationRefs;
 }
 
 export interface AbRunManifestInput {
@@ -137,6 +212,7 @@ export interface AbRunManifestInput {
   candidateTaskIds?: readonly string[];
   maxExpertTimeEstimateMin?: number | null;
   targetEvaluationTaskCount?: number | null;
+  nonInferiorityMargin?: number;
 }
 
 export type AbRunManifest = AbRunManifestInput & {

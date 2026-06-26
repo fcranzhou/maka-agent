@@ -35,7 +35,6 @@ _HOST_NODE_ENV_ALLOWLIST = {
     "NODE_EXTRA_CA_CERTS",
 }
 
-
 def _host_node_process_env(cell_env: dict[str, str]) -> dict[str, str]:
     env = {key: value for key in _HOST_NODE_ENV_ALLOWLIST if (value := os.environ.get(key))}
     env.update(cell_env)
@@ -283,6 +282,12 @@ class MakaAgent(BaseInstalledAgent):
         ):
             value = self._get_env(key)
             if value:
+                env[key] = value
+        for key, value in os.environ.items():
+            if key.startswith("MAKA_CONTEXT_"):
+                env[key] = value
+        for key, value in getattr(self, "_extra_env", {}).items():
+            if key.startswith("MAKA_CONTEXT_") and value is not None:
                 env[key] = value
         return env
 

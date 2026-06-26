@@ -1,11 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, truncate, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { validateHarborCellOutput, type HarborCellOutput, type HarborCellTokenSummary } from './cell-output.js';
+import {
+  validateHarborCellOutput,
+  type HarborCellContextBudgetPolicySnapshot,
+  type HarborCellContextBudgetSummary,
+  type HarborCellOutput,
+  type HarborCellTokenSummary,
+} from './cell-output.js';
 import type { Config } from './contracts.js';
 import { assertFinitePositive, assertPositiveInt, assertRatio } from './numeric-guards.js';
 
 export const FIXED_PROMPT_WAL_SCHEMA_VERSION = 1;
+export const BUDGET_EXHAUSTED_RUNTIME_UNAVAILABLE_REASON = 'budget_exhausted_before_cell_output';
 
 export interface FixedPromptTask {
   id: string;
@@ -37,12 +44,23 @@ export interface HarborTaskRunInput {
   task: FixedPromptTask;
   config: Config;
   systemPrompt: string;
+  agentEnv?: Record<string, string>;
 }
 
 export type HarborTaskRunner = (input: HarborTaskRunInput) => Promise<HarborTaskRunOutput>;
 
+export interface FixedPromptBudgetExhaustedArtifactRefs {
+  runtimeEventsPath?: string;
+  traceEventsPath?: string;
+  runtimeEventsUnavailableReason?: string;
+}
+
 export class FixedPromptBudgetExhaustedError extends Error {
-  constructor(message: string, readonly detail?: string) {
+  constructor(
+    message: string,
+    readonly detail?: string,
+    readonly artifactRefs?: FixedPromptBudgetExhaustedArtifactRefs,
+  ) {
     super(message);
     this.name = 'FixedPromptBudgetExhaustedError';
   }
@@ -69,6 +87,8 @@ export interface FixedPromptTaskCompletedEvent {
   errorClass?: string;
   promptHash?: string;
   tokenSummary: HarborCellTokenSummary;
+  contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
+  contextBudgetSummary?: HarborCellContextBudgetSummary;
   steps: number;
   durationMs: number;
   runtimeEventsPath: string;
@@ -111,6 +131,9 @@ export interface FixedPromptTaskBudgetExhaustedEvent {
   errorClass: 'budget_exhausted';
   error: string;
   expectedPromptHash: string;
+  runtimeEventsPath?: string;
+  traceEventsPath?: string;
+  runtimeEventsUnavailableReason?: string;
 }
 
 export interface FixedPromptTaskPlumbingFailedEvent {
@@ -131,6 +154,8 @@ export interface FixedPromptTaskPlumbingFailedEvent {
   promptHash?: string;
   expectedPromptHash?: string;
   tokenSummary: HarborCellTokenSummary;
+  contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
+  contextBudgetSummary?: HarborCellContextBudgetSummary;
   steps: number;
   durationMs: number;
   runtimeEventsPath: string;
@@ -557,6 +582,8 @@ function taskCompletedEvent(input: {
     ...(errorClass ? { errorClass } : {}),
     ...(output.cell.promptHash ? { promptHash: output.cell.promptHash } : {}),
     tokenSummary: output.cell.tokenSummary,
+    ...(output.cell.contextBudgetPolicy ? { contextBudgetPolicy: output.cell.contextBudgetPolicy } : {}),
+    ...(output.cell.contextBudgetSummary ? { contextBudgetSummary: output.cell.contextBudgetSummary } : {}),
     steps: output.cell.steps,
     durationMs: output.cell.durationMs,
     runtimeEventsPath: output.cell.runtimeEventsPath,
@@ -597,6 +624,12 @@ function taskPlumbingFailedEvent(input: {
     ...(input.output.cell.promptHash ? { promptHash: input.output.cell.promptHash } : {}),
     expectedPromptHash: input.expectedPromptHash,
     tokenSummary: input.output.cell.tokenSummary,
+    ...(input.output.cell.contextBudgetPolicy
+      ? { contextBudgetPolicy: input.output.cell.contextBudgetPolicy }
+      : {}),
+    ...(input.output.cell.contextBudgetSummary
+      ? { contextBudgetSummary: input.output.cell.contextBudgetSummary }
+      : {}),
     steps: input.output.cell.steps,
     durationMs: input.output.cell.durationMs,
     runtimeEventsPath: input.output.cell.runtimeEventsPath,
@@ -669,6 +702,7 @@ function taskBudgetExhaustedEvent(input: {
   id: string;
   ts: number;
 }): FixedPromptTaskBudgetExhaustedEvent {
+  const artifactRefs = budgetExhaustedArtifactRefs(input.error);
   return {
     schemaVersion: FIXED_PROMPT_WAL_SCHEMA_VERSION,
     type: 'task_budget_exhausted',
@@ -685,7 +719,20 @@ function taskBudgetExhaustedEvent(input: {
     errorClass: 'budget_exhausted',
     error: errorMessage(input.error),
     expectedPromptHash: input.expectedPromptHash,
+    ...(artifactRefs.runtimeEventsPath ? { runtimeEventsPath: artifactRefs.runtimeEventsPath } : {}),
+    ...(artifactRefs.traceEventsPath ? { traceEventsPath: artifactRefs.traceEventsPath } : {}),
+    ...(artifactRefs.runtimeEventsUnavailableReason
+      ? { runtimeEventsUnavailableReason: artifactRefs.runtimeEventsUnavailableReason }
+      : {}),
   };
+}
+
+function budgetExhaustedArtifactRefs(error: unknown): FixedPromptBudgetExhaustedArtifactRefs {
+  if (isBudgetExhaustedError(error)) {
+    const refs = (error as { artifactRefs?: FixedPromptBudgetExhaustedArtifactRefs }).artifactRefs;
+    if (refs && (refs.runtimeEventsPath || refs.traceEventsPath || refs.runtimeEventsUnavailableReason)) return refs;
+  }
+  return { runtimeEventsUnavailableReason: BUDGET_EXHAUSTED_RUNTIME_UNAVAILABLE_REASON };
 }
 
 function terminalTaskEvents(

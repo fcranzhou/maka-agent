@@ -33,7 +33,12 @@ import {
   createSessionStore,
 } from '@maka/storage';
 import { registerFakeBackend } from './backends.js';
-import { buildHarborCellOutput, validateHarborCellOutput, type HarborCellOutput } from './cell-output.js';
+import {
+  buildHarborCellOutput,
+  validateHarborCellOutput,
+  type HarborCellContextBudgetPolicySnapshot,
+  type HarborCellOutput,
+} from './cell-output.js';
 import type { Config, Task } from './contracts.js';
 import { configWithHeavyTaskPolicy, resolveHeavyTaskMode } from './heavy-task-policy.js';
 import type { HeadlessBackendContext, IsolatedToolExecutor, RealBackendIsolation } from './isolation.js';
@@ -58,6 +63,7 @@ export interface RunHarborCellInput {
     context: HeadlessBackendContext,
   ) => void | Promise<void>;
   realBackendIsolation?: RealBackendIsolation;
+  contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   now?: () => number;
   newId?: () => string;
 }
@@ -86,6 +92,50 @@ export interface HarborCellContextBudgetBackendOptions {
   contextBudget?: ContextBudgetPolicy;
   archiveToolResult?: ToolResultArchiveRecorder;
   readToolResultArchive?: ToolResultArchiveReader;
+}
+
+export const HARBOR_CELL_CONTEXT_ENV_KEYS = [
+  'MAKA_CONTEXT_BUDGET',
+  'MAKA_CONTEXT_BUDGET_NAME',
+  'MAKA_CONTEXT_CHARS_PER_TOKEN',
+  'MAKA_CONTEXT_MAX_HISTORY_ESTIMATED_TOKENS',
+  'MAKA_CONTEXT_MAX_HISTORY_TURNS',
+  'MAKA_CONTEXT_HISTORY_BUDGET_TOKENS',
+  'MAKA_CONTEXT_HISTORY_BUDGET_TURNS',
+  'MAKA_CONTEXT_MIN_RECENT_TURNS',
+  'MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE',
+  'MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_ESTIMATED_TOKENS',
+  'MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE_MAX_ESTIMATED_TOKENS',
+  'MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_TOKENS',
+  'MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS_FULL',
+  'MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS',
+  'MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE',
+  'MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MAX_ESTIMATED_TOKENS',
+  'MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE_MAX_ESTIMATED_TOKENS',
+  'MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MIN_STEP_NUMBER',
+  'MAKA_CONTEXT_ARCHIVE_RETRIEVAL',
+  'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE',
+  'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS',
+  'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_ESTIMATED_TOKENS',
+  'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_TOKENS',
+  'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_BYTES',
+  'MAKA_CONTEXT_TOOL_RESULT_ARCHIVE_DIR',
+] as const;
+
+export type HarborCellContextEnvKey = typeof HARBOR_CELL_CONTEXT_ENV_KEYS[number];
+
+const HARBOR_CELL_CONTEXT_ENV_KEY_SET = new Set<string>(HARBOR_CELL_CONTEXT_ENV_KEYS);
+
+export function normalizeHarborCellContextEnv(
+  env: RunHarborCellEnv,
+): Partial<Record<HarborCellContextEnvKey, string>> {
+  const result: Partial<Record<HarborCellContextEnvKey, string>> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.startsWith('MAKA_CONTEXT_')) continue;
+    if (!HARBOR_CELL_CONTEXT_ENV_KEY_SET.has(key)) throw new Error(`unsupported Harbor context env key: ${key}`);
+    if (value !== undefined) result[key as HarborCellContextEnvKey] = value;
+  }
+  return result;
 }
 
 interface HarborCellToolResultArchiveRecord {
@@ -203,7 +253,11 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   const runtimeEventsPath = join(input.outputDir, HARBOR_CELL_RUNTIME_EVENTS_FILENAME);
   const outputPath = join(input.outputDir, HARBOR_CELL_OUTPUT_FILENAME);
   await writeFile(runtimeEventsPath, runtimeEventsJsonl(invocation), 'utf8');
-  const output = validateHarborCellOutput(buildHarborCellOutput({ invocation, runtimeEventsPath }));
+  const output = validateHarborCellOutput(buildHarborCellOutput({
+    invocation,
+    runtimeEventsPath,
+    ...(input.contextBudgetPolicy ? { contextBudgetPolicy: input.contextBudgetPolicy } : {}),
+  }));
   await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
 
   return { invocation, output, outputPath, runtimeEventsPath };
@@ -219,6 +273,7 @@ export async function runHarborCellFromEnv(
   const storageRoot = env.MAKA_STORAGE_ROOT ?? join(outputDir, 'maka-storage');
   const resolvedEnv: RunHarborCellEnv = { ...env, MAKA_OUTPUT_DIR: outputDir, MAKA_STORAGE_ROOT: storageRoot };
   const backend = backendFromEnv(resolvedEnv.MAKA_BACKEND);
+  const contextBudgetPolicy = buildHarborCellContextBudgetPolicySnapshot(resolvedEnv);
   const baseConfig = {
     id: resolvedEnv.MAKA_CONFIG_ID ?? 'harbor-cell',
     backend,
@@ -292,6 +347,7 @@ export async function runHarborCellFromEnv(
     cwd: resolvedEnv.MAKA_WORKDIR ?? process.cwd(),
     outputDir,
     storageRoot,
+    ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     ...(registerBackends ? { registerBackends } : {}),
     ...(backendNeedsIsolation(backend)
       ? {
@@ -374,40 +430,56 @@ export function buildHarborCellAiSdkTools(
 export function buildHarborCellContextBudgetBackendOptions(
   env: RunHarborCellEnv = process.env,
 ): HarborCellContextBudgetBackendOptions {
+  normalizeHarborCellContextEnv(env);
+  if (env.MAKA_CONTEXT_BUDGET === 'off') return {};
   const pruneEnabled = booleanEnv(
     env.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE ??
     env.MAKA_HARBOR_CONTEXT_STALE_TOOL_RESULT_PRUNE ??
     env.MAKA_TOOL_RESULT_PRUNE,
-  );
+    'MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE',
+  ) ?? false;
   const activePruneEnabled = booleanEnv(
     env.MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE ??
     env.MAKA_HARBOR_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE ??
     env.MAKA_ACTIVE_TOOL_RESULT_PRUNE,
-  );
+    'MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE',
+  ) ?? false;
   const archiveRetrievalEnabled = booleanEnv(
     env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL ??
     env.MAKA_HARBOR_CONTEXT_ARCHIVE_RETRIEVAL,
-  );
+    'MAKA_CONTEXT_ARCHIVE_RETRIEVAL',
+  ) ?? false;
   if (!pruneEnabled && !activePruneEnabled && !archiveRetrievalEnabled) return {};
 
   const contextBudget: ContextBudgetPolicy = {
-    name: env.MAKA_CONTEXT_BUDGET_NAME ?? 'harbor-context-budget',
+    name: env.MAKA_CONTEXT_BUDGET_NAME ?? 'harbor-cell-context-budget',
   };
   const charsPerToken = numericEnv(env.MAKA_CONTEXT_CHARS_PER_TOKEN);
-  const maxHistoryEstimatedTokens = numericEnv(env.MAKA_CONTEXT_MAX_HISTORY_ESTIMATED_TOKENS);
-  const maxHistoryTurns = numericEnv(env.MAKA_CONTEXT_MAX_HISTORY_TURNS);
-  const minRecentTurns = numericEnv(env.MAKA_CONTEXT_MIN_RECENT_TURNS);
+  const maxHistoryEstimatedTokens = firstContextNonNegativeIntEnv(env, [
+    'MAKA_CONTEXT_MAX_HISTORY_ESTIMATED_TOKENS',
+    'MAKA_CONTEXT_HISTORY_BUDGET_TOKENS',
+  ]);
+  const maxHistoryTurns = firstContextNonNegativeIntEnv(env, [
+    'MAKA_CONTEXT_MAX_HISTORY_TURNS',
+    'MAKA_CONTEXT_HISTORY_BUDGET_TURNS',
+  ]);
+  const minRecentTurns = firstContextNonNegativeIntEnv(env, ['MAKA_CONTEXT_MIN_RECENT_TURNS']);
   if (charsPerToken !== undefined) contextBudget.charsPerToken = charsPerToken;
   if (maxHistoryEstimatedTokens !== undefined) contextBudget.maxHistoryEstimatedTokens = maxHistoryEstimatedTokens;
   if (maxHistoryTurns !== undefined) contextBudget.maxHistoryTurns = maxHistoryTurns;
   if (minRecentTurns !== undefined) contextBudget.minRecentTurns = minRecentTurns;
 
   if (pruneEnabled) {
-    const maxResultEstimatedTokens = numericEnv(
+    const maxResultEstimatedTokens = positiveIntEnv(
       env.MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_ESTIMATED_TOKENS ??
-      env.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE_MAX_ESTIMATED_TOKENS,
+      env.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE_MAX_ESTIMATED_TOKENS ??
+      env.MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_TOKENS,
+      'MAKA_CONTEXT_STALE_TOOL_RESULT_MAX_ESTIMATED_TOKENS',
     );
-    const minRecentTurnsFull = numericEnv(env.MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS_FULL);
+    const minRecentTurnsFull = firstContextNonNegativeIntEnv(env, [
+      'MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS_FULL',
+      'MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS',
+    ]);
     contextBudget.staleToolResultPrune = {
       enabled: true,
       ...(maxResultEstimatedTokens !== undefined ? { maxResultEstimatedTokens } : {}),
@@ -416,11 +488,12 @@ export function buildHarborCellContextBudgetBackendOptions(
   }
 
   if (activePruneEnabled) {
-    const maxCurrentResultEstimatedTokens = numericEnv(
+    const maxCurrentResultEstimatedTokens = positiveIntEnv(
       env.MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MAX_ESTIMATED_TOKENS ??
       env.MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE_MAX_ESTIMATED_TOKENS,
+      'MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MAX_ESTIMATED_TOKENS',
     );
-    const minStepNumber = numericEnv(env.MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MIN_STEP_NUMBER);
+    const minStepNumber = firstContextNonNegativeIntEnv(env, ['MAKA_CONTEXT_ACTIVE_TOOL_RESULT_MIN_STEP_NUMBER']);
     contextBudget.activeToolResultPrune = {
       enabled: true,
       ...(maxCurrentResultEstimatedTokens !== undefined ? { maxCurrentResultEstimatedTokens } : {}),
@@ -429,14 +502,17 @@ export function buildHarborCellContextBudgetBackendOptions(
   }
 
   if (archiveRetrievalEnabled) {
-    const maxResults = numericEnv(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS);
-    const maxEstimatedTokens = numericEnv(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_ESTIMATED_TOKENS);
-    const maxBytes = numericEnv(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_BYTES);
+    const mode = archiveRetrievalModeEnv(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE);
+    const maxResults = positiveIntEnv(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS, 'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_RESULTS');
+    const maxEstimatedTokens = positiveIntEnv(
+      env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_ESTIMATED_TOKENS ??
+      env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_TOKENS,
+      'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_ESTIMATED_TOKENS',
+    );
+    const maxBytes = positiveIntEnv(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_BYTES, 'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MAX_BYTES');
     contextBudget.archiveRetrieval = {
       enabled: true,
-      ...(env.MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE === 'history_search_gated'
-        ? { mode: 'history_search_gated' as const }
-        : {}),
+      ...(mode ? { mode } : {}),
       ...(maxResults !== undefined ? { maxResults } : {}),
       ...(maxEstimatedTokens !== undefined ? { maxEstimatedTokens } : {}),
       ...(maxBytes !== undefined ? { maxBytes } : {}),
@@ -492,6 +568,45 @@ export function buildHarborCellContextBudgetBackendOptions(
       }
       return { ok: true, serializedResult: parsed.serializedResult };
     },
+  };
+}
+
+export function buildHarborCellContextBudgetPolicySnapshot(
+  env: RunHarborCellEnv,
+): HarborCellContextBudgetPolicySnapshot | undefined {
+  if (env.MAKA_CONTEXT_BUDGET === 'off') return { enabled: false };
+  const contextBudget = buildHarborCellContextBudgetBackendOptions(env).contextBudget;
+  if (!contextBudget) return undefined;
+  const minRecentTurns = contextBudget.minRecentTurns ?? 2;
+  return {
+    enabled: true,
+    name: contextBudget.name,
+    ...(contextBudget.maxHistoryTurns !== undefined ? { maxHistoryTurns: contextBudget.maxHistoryTurns } : {}),
+    ...(contextBudget.maxHistoryEstimatedTokens !== undefined
+      ? { maxHistoryEstimatedTokens: contextBudget.maxHistoryEstimatedTokens }
+      : {}),
+    ...(contextBudget.staleToolResultPrune
+      ? {
+          staleToolResultPrune: {
+            enabled: contextBudget.staleToolResultPrune.enabled,
+            maxResultEstimatedTokens: contextBudget.staleToolResultPrune.maxResultEstimatedTokens ?? 2048,
+            minRecentTurnsFull: contextBudget.staleToolResultPrune.minRecentTurnsFull ?? minRecentTurns,
+          },
+        }
+      : {}),
+    ...(contextBudget.archiveRetrieval
+      ? {
+          archiveRetrieval: {
+            enabled: contextBudget.archiveRetrieval.enabled,
+            ...(contextBudget.archiveRetrieval.mode ? { mode: contextBudget.archiveRetrieval.mode } : {}),
+            maxResults: contextBudget.archiveRetrieval.maxResults ?? 3,
+            maxEstimatedTokens: contextBudget.archiveRetrieval.maxEstimatedTokens ?? 8192,
+            maxBytes: contextBudget.archiveRetrieval.maxBytes ?? 1024 * 1024,
+            order: 'newest_first',
+          },
+        }
+      : {}),
+    minRecentTurns,
   };
 }
 
@@ -596,17 +711,58 @@ function numericEnv(raw: string | undefined): number | undefined {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function booleanEnv(raw: string | undefined): boolean {
-  if (raw === undefined) return false;
-  switch (raw.trim().toLowerCase()) {
+function positiveIntEnv(raw: string | undefined, name: string): number | undefined {
+  const value = raw?.trim();
+  if (value === undefined || value === '') return undefined;
+  if (!/^[1-9]\d*$/.test(value)) throw new Error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`);
+  return Number(value);
+}
+
+function firstContextNonNegativeIntEnv(
+  env: RunHarborCellEnv,
+  names: readonly string[],
+): number | undefined {
+  for (const name of names) {
+    const raw = env[name];
+    if (raw !== undefined) return contextNonNegativeIntEnv(raw, name);
+  }
+  return undefined;
+}
+
+function contextNonNegativeIntEnv(raw: string | undefined, name: string): number | undefined {
+  const value = raw?.trim();
+  if (value === undefined || value === '') return undefined;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a non-negative integer, got ${JSON.stringify(raw)}`);
+  return Number(value);
+}
+
+function archiveRetrievalModeEnv(
+  raw: string | undefined,
+): NonNullable<ContextBudgetPolicy['archiveRetrieval']>['mode'] | undefined {
+  const value = raw?.trim();
+  if (value === undefined || value === '') return undefined;
+  if (value === 'eager' || value === 'history_search_gated') return value;
+  throw new Error(`MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE must be one of eager, history_search_gated, got ${JSON.stringify(raw)}`);
+}
+
+function booleanEnv(raw: string | undefined, name: string): boolean | undefined {
+  const value = raw?.trim().toLowerCase();
+  if (value === undefined || value === '') return undefined;
+  switch (value) {
     case '1':
     case 'true':
     case 'yes':
     case 'on':
     case 'enabled':
       return true;
-    default:
+    case '0':
+    case 'false':
+    case 'no':
+    case 'off':
+    case 'disabled':
       return false;
+    default:
+      throw new Error(`${name} must be a boolean, got ${JSON.stringify(raw)}`);
   }
 }
 

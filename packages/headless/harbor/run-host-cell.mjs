@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   buildAiSdkCellBackendRegistration,
+  buildHarborCellContextBudgetPolicySnapshot,
+  normalizeHarborCellContextEnv,
   runHarborCell,
 } from '#harbor-cell';
 
@@ -14,12 +16,19 @@ const TRIAL_PRICING_ENV = [
   'MAKA_TRIAL_CACHE_WRITE_USD_PER_1M',
   'MAKA_TRIAL_PRICING_SOURCE',
 ];
-
-try {
+const HOST_BACKEND_ENV_KEYS = [
+  ...TRIAL_PRICING_ENV,
+  'MAKA_OUTPUT_DIR',
+  'MAKA_STORAGE_ROOT',
+];
+export async function main() {
   const env = process.env;
   const provider = env.MAKA_PROVIDER || providerFromModel(env.MAKA_MODEL || env.HARBOR_MODEL || 'deepseek/deepseek-v4-flash');
   const model = env.MAKA_MODEL || stripProvider(env.HARBOR_MODEL || 'deepseek/deepseek-v4-flash', provider);
   const outputDir = env.MAKA_OUTPUT_DIR || join(process.cwd(), 'agent');
+  const storageRoot = env.MAKA_STORAGE_ROOT || join(outputDir, 'maka-storage');
+  const contextEnv = normalizeHarborCellContextEnv(env);
+  const contextBudgetPolicy = buildHarborCellContextBudgetPolicySnapshot(contextEnv);
   const now = Date.now;
   const newId = randomId;
 
@@ -34,11 +43,12 @@ try {
     instruction: await instructionFromEnv(env),
     cwd: env.MAKA_WORKDIR || process.cwd(),
     outputDir,
-    storageRoot: env.MAKA_STORAGE_ROOT || join(outputDir, 'maka-storage'),
+    storageRoot,
+    ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     registerBackends: buildAiSdkCellBackendRegistration({
       provider,
       model,
-      env: await backendEnv(env, provider),
+      env: await backendEnv({ ...env, MAKA_OUTPUT_DIR: outputDir, MAKA_STORAGE_ROOT: storageRoot }, provider),
       now,
       newId,
     }),
@@ -57,23 +67,21 @@ try {
     outputPath: result.outputPath,
     runtimeEventsPath: result.runtimeEventsPath,
   }));
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`maka run-host-cell failed: ${message}`);
-  process.exitCode = 1;
 }
 
-async function backendEnv(env, provider) {
+export async function backendEnv(env, provider) {
   const keyEnvName = env.MAKA_HOST_API_KEY_ENV_NAME || defaultKeyEnvName(provider);
   const apiKey = await hostApiKey(env);
+  const contextEnv = normalizeHarborCellContextEnv(env);
   const result = {
     MAKA_LLM_CONNECTION_SLUG: env.MAKA_LLM_CONNECTION_SLUG || provider,
     [keyEnvName]: apiKey,
   };
   if (env.MAKA_HOST_BASE_URL) result.MAKA_BASE_URL = env.MAKA_HOST_BASE_URL;
-  for (const key of TRIAL_PRICING_ENV) {
+  for (const key of HOST_BACKEND_ENV_KEYS) {
     if (env[key] !== undefined) result[key] = env[key];
   }
+  Object.assign(result, contextEnv);
   return result;
 }
 
@@ -155,4 +163,12 @@ function requiredEnv(env, name) {
 
 function randomId() {
   return globalThis.crypto?.randomUUID?.() ?? `host_cell_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+
+if (process.argv[1] && new URL(process.argv[1], 'file:').href === import.meta.url) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`maka run-host-cell failed: ${message}`);
+    process.exitCode = 1;
+  });
 }

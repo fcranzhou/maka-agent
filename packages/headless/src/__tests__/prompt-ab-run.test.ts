@@ -487,8 +487,8 @@ describe('summarizePromptAbComparison', () => {
       budgetMs: 600_000,
     });
 
-    assert.equal(result.decision, 'inconclusive');
-    assert.equal(result.reason, 'sign_test_not_significant');
+    assert.equal(result.decision, 'non_inferior');
+    assert.equal(result.reason, 'non_inferiority_lower_bound_within_margin');
     assert.equal(result.taskCount, 2);
     assert.equal(result.reps, 2);
     assert.equal(result.baseline.passRate, 0.25);
@@ -502,7 +502,7 @@ describe('summarizePromptAbComparison', () => {
     assert.equal(result.candidate.budgetExhausted, 0);
 
     const markdown = renderPromptAbComparisonMarkdown(result);
-    assert.match(markdown, /Decision: inconclusive \(sign_test_not_significant\)/);
+    assert.match(markdown, /Decision: B non-inferior \(non_inferiority_lower_bound_within_margin\)/);
     assert.match(markdown, /Budget: 600s task budget/);
     assert.match(markdown, /Evaluation pass rate: A=1\/4 = 0.25, B=4\/4 = 1/);
     assert.match(markdown, /Task-level delta: mean=0.75/);
@@ -521,8 +521,8 @@ describe('summarizePromptAbComparison', () => {
       budgetMs: 600_000,
     });
 
-    assert.equal(result.decision, 'inconclusive');
-    assert.equal(result.reason, 'asymmetric_budget_exhaustion');
+    assert.equal(result.decision, 'inferior');
+    assert.equal(result.reason, 'pass_rate_delta_below_non_inferiority_margin');
     assert.equal(result.candidate.passRate, 0);
     assert.equal(result.candidate.budgetExhausted, 1);
     assert.equal(result.candidate.infraFailed, 0);
@@ -530,7 +530,167 @@ describe('summarizePromptAbComparison', () => {
     assert.match(renderPromptAbComparisonMarkdown(result), /Budget outcomes: A timed_out=0, B timed_out=1/);
   });
 
-  test('does not call a small task majority statistically significant', () => {
+  test('summarizes context budget activation in the A/B report', () => {
+    const baselineInactive = contextBudgetSummary({ prunedToolResults: 0 });
+    const candidateActive = contextBudgetSummary({
+      prunedToolResults: 2,
+      archivePlaceholders: 2,
+      retrievedArchiveToolResults: 1,
+      retrievedArchiveEstimatedTokens: 120,
+    });
+    const candidateInactive = contextBudgetSummary({ prunedToolResults: 0 });
+    const result = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: ['t1', 't2'],
+      baselineRuns: [[
+        { ...completed('t1', true), contextBudgetPolicy: { enabled: false }, contextBudgetSummary: baselineInactive },
+        { ...completed('t2', true), contextBudgetPolicy: { enabled: false }, contextBudgetSummary: baselineInactive },
+      ]],
+      candidateRuns: [[
+        {
+          ...completed('t1', true),
+          contextBudgetPolicy: {
+            enabled: true,
+            name: 'harbor-cell-context-budget',
+            staleToolResultPrune: { enabled: true, maxResultEstimatedTokens: 2048, minRecentTurnsFull: 2 },
+            minRecentTurns: 2,
+          },
+          contextBudgetSummary: candidateActive,
+        },
+        {
+          ...completed('t2', true),
+          contextBudgetPolicy: {
+            enabled: true,
+            name: 'harbor-cell-context-budget',
+            staleToolResultPrune: { enabled: true, maxResultEstimatedTokens: 2048, minRecentTurnsFull: 2 },
+            minRecentTurns: 2,
+          },
+          contextBudgetSummary: candidateInactive,
+        },
+      ]],
+    });
+
+    assert.equal(result.baseline.contextBudgetPolicy?.enabledAttempts, 0);
+    assert.equal(result.candidate.contextBudgetPolicy?.enabledAttempts, 2);
+    assert.deepEqual(result.candidate.contextBudget, {
+      diagnosticAttempts: 2,
+      activatedAttempts: 1,
+      activatedAttemptIds: ['event-t1-pass'],
+      diagnosticEvents: 2,
+      prunedToolResults: 2,
+      archivePlaceholders: 2,
+      archiveWriteFailures: 0,
+      retrievedArchiveToolResults: 1,
+      retrievedArchiveEstimatedTokens: 120,
+      archiveRetrievalSkipped: 0,
+      archiveRetrievalFailures: 0,
+    });
+    assert.match(
+      renderPromptAbComparisonMarkdown(result),
+      /Context budget: A activated=0\/2 pruned=0 retrieved=0, B activated=1\/2 pruned=2 retrieved=1/,
+    );
+    assert.match(
+      renderPromptAbComparisonMarkdown(result),
+      /Context budget policy: A enabled=0\/2 snapshots=\[{"enabled":false}\], B enabled=2\/2 snapshots=/,
+    );
+  });
+
+  test('summarizes A/B token cost usage for prune benefit review', () => {
+    const taskIds = Array.from({ length: 1000 }, (_, index) => `t${index}`);
+    const result = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: taskIds,
+      baselineRuns: [taskIds.map((taskId) => withUsage(
+        completed(taskId, true),
+        { input: 100, cacheHitInput: 20, cacheMissInput: 70, cacheWriteInput: 10, output: 30, reasoning: 5, total: 135, costUsd: 3, durationMs: 1000 },
+      ))],
+      candidateRuns: [taskIds.map((taskId) => withUsage(
+        completed(taskId, true),
+        { input: 60, cacheHitInput: 15, cacheMissInput: 40, cacheWriteInput: 5, output: 25, reasoning: 5, total: 90, costUsd: 2, durationMs: 800 },
+      ))],
+    });
+
+    assert.equal(result.decision, 'non_inferior');
+    assert.deepEqual(result.baseline.tokenCostSummary, {
+      input: 100_000,
+      cachedInput: 20_000,
+      cacheHitInput: 20_000,
+      cacheMissInput: 70_000,
+      cacheWriteInput: 10_000,
+      output: 30_000,
+      reasoning: 5000,
+      total: 135_000,
+      costUsd: 3000,
+      meanDurationMs: 1000,
+    });
+    assert.deepEqual(result.candidate.tokenCostSummary, {
+      input: 60_000,
+      cachedInput: 15_000,
+      cacheHitInput: 15_000,
+      cacheMissInput: 40_000,
+      cacheWriteInput: 5000,
+      output: 25_000,
+      reasoning: 5000,
+      total: 90_000,
+      costUsd: 2000,
+      meanDurationMs: 800,
+    });
+
+    const markdown = renderPromptAbComparisonMarkdown(result);
+    assert.match(markdown, /Token\/cost: A input=100000 cache_hit=20000 cache_miss=70000 cache_write=10000 output=30000 total=135000 cost_usd=3000 mean_duration_ms=1000/);
+    assert.match(markdown, /B input=60000 cache_hit=15000 cache_miss=40000 cache_write=5000 output=25000 total=90000 cost_usd=2000 mean_duration_ms=800/);
+  });
+
+  test('records activated attempts and investigation refs for follow-up', () => {
+    const activatedSummary = contextBudgetSummary({ prunedToolResults: 1, archivePlaceholders: 1 });
+    const result = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: ['b-loss', 'activated', 'budget'],
+      baselineRuns: [[
+        withTrace(completed('b-loss', true), 'A', 'b-loss'),
+        withTrace(completed('activated', true), 'A', 'activated'),
+        withTrace(completed('budget', true), 'A', 'budget'),
+      ]],
+      candidateRuns: [[
+        withTrace(completed('b-loss', false), 'B', 'b-loss'),
+        {
+          ...withTrace(completed('activated', true), 'B', 'activated'),
+          id: 'event-B-activated-r0',
+          contextBudgetSummary: activatedSummary,
+        },
+        { ...budgetExhausted('budget'), id: 'event-B-budget-r0', roundId: 'ab-prune-on-r0-budget' },
+      ]],
+    });
+
+    assert.deepEqual(result.candidate.contextBudget?.activatedAttemptIds, ['event-B-activated-r0']);
+    assert.equal(result.investigationRefs.activatedAttempts[0]?.taskId, 'activated');
+    assert.equal(result.investigationRefs.activatedAttempts[0]?.rep, 0);
+    assert.equal(result.investigationRefs.activatedAttempts[0]?.runtimeEventsPath, '/logs/B/activated/runtime-events.jsonl');
+    assert.equal(result.investigationRefs.activatedAttempts[0]?.traceEventsPath, '/traces/B/activated/events.jsonl');
+    assert.equal(result.investigationRefs.candidateLosses[0]?.pairId, 'b-loss#r0');
+    assert.equal(result.investigationRefs.candidateLosses[0]?.candidate?.runtimeEventsPath, '/logs/B/b-loss/runtime-events.jsonl');
+    assert.equal(result.investigationRefs.budgetDiscordantPairs[0]?.pairId, 'budget#r0');
+    assert.equal(result.investigationRefs.budgetDiscordantPairs[0]?.candidate?.runtimeEventsUnavailableReason, 'budget_exhausted_before_cell_output');
+
+    const markdown = renderPromptAbComparisonMarkdown(result);
+    assert.match(markdown, /Activated Attempts/);
+    assert.match(markdown, /event-B-activated-r0.*\/traces\/B\/activated\/events\.jsonl/);
+    assert.match(markdown, /B Loss Refs/);
+    assert.match(markdown, /b-loss#r0.*\/logs\/B\/b-loss\/runtime-events\.jsonl/);
+    assert.match(markdown, /Budget Discordant Refs/);
+    assert.match(markdown, /budget#r0.*runtime_unavailable=budget_exhausted_before_cell_output/);
+  });
+
+  test('keeps sign test auxiliary while using non-inferiority as the decision', () => {
     const taskIds = Array.from({ length: 16 }, (_, index) => `t${index}`);
     const result = summarizePromptAbComparison({
       runId: 'ab-run',
@@ -548,11 +708,13 @@ describe('summarizePromptAbComparison', () => {
 
     assert.equal(result.taskLevel.wins, 9);
     assert.equal(result.taskLevel.losses, 7);
+    assert.equal(result.taskLevel.signTestPValue !== null && result.taskLevel.signTestPValue > 0.05, true);
     assert.equal(result.decision, 'inconclusive');
-    assert.equal(result.reason, 'sign_test_not_significant');
+    assert.equal(result.reason, 'non_inferiority_confidence_interval_crosses_margin');
+    assert.equal(result.nonInferiority.lowerBound !== null && result.nonInferiority.lowerBound < -0.1, true);
   });
 
-  test('uses an exact task-level sign test for a directional decision', () => {
+  test('keeps an exact task-level sign test as an auxiliary metric', () => {
     const taskIds = Array.from({ length: 16 }, (_, index) => `t${index}`);
     const result = summarizePromptAbComparison({
       runId: 'ab-run',
@@ -570,26 +732,195 @@ describe('summarizePromptAbComparison', () => {
 
     assert.equal(result.taskLevel.wins, 13);
     assert.equal(result.taskLevel.losses, 3);
-    assert.equal(result.decision, 'candidate_better');
-    assert.equal(result.reason, 'task_level_sign_test_p<=0.05');
+    assert.equal(result.taskLevel.signTestPValue !== null && result.taskLevel.signTestPValue <= 0.05, true);
+    assert.equal(result.decision, 'non_inferior');
+    assert.equal(result.reason, 'non_inferiority_lower_bound_within_margin');
   });
 
-  test('treats pair-level timeout asymmetry as inconclusive even when total timeouts match', () => {
+  test('requires a 10pp non-inferiority confidence bound for prune comparisons', () => {
+    const underpoweredNinePointLoss = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: Array.from({ length: 100 }, (_, index) => `t${index}`),
+      baselineRuns: [Array.from({ length: 100 }, (_, index) => completed(`t${index}`, index < 100))],
+      candidateRuns: [Array.from({ length: 100 }, (_, index) => completed(`t${index}`, index < 91))],
+    });
+    assert.equal(underpoweredNinePointLoss.nonInferiorityMargin, 0.1);
+    assert.equal(underpoweredNinePointLoss.passRateDelta, -0.09);
+    assert.equal(underpoweredNinePointLoss.decision, 'inconclusive');
+    assert.equal(underpoweredNinePointLoss.reason, 'non_inferiority_confidence_interval_crosses_margin');
+    assert.equal(underpoweredNinePointLoss.nonInferiority.lowerBound !== null && underpoweredNinePointLoss.nonInferiority.lowerBound < -0.1, true);
+    assert.match(renderPromptAbComparisonMarkdown(underpoweredNinePointLoss), /Non-inferiority lower bound:/);
+
+    const poweredFivePointLoss = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: Array.from({ length: 1000 }, (_, index) => `t${index}`),
+      baselineRuns: [Array.from({ length: 1000 }, (_, index) => completed(`t${index}`, index < 1000))],
+      candidateRuns: [Array.from({ length: 1000 }, (_, index) => completed(`t${index}`, index < 950))],
+    });
+    assert.equal(poweredFivePointLoss.passRateDelta, -0.05);
+    assert.equal(poweredFivePointLoss.nonInferiority.lowerBound !== null && poweredFivePointLoss.nonInferiority.lowerBound >= -0.1, true);
+    assert.equal(poweredFivePointLoss.decision, 'non_inferior');
+    assert.equal(poweredFivePointLoss.reason, 'non_inferiority_lower_bound_within_margin');
+
+    const elevenPointLoss = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: Array.from({ length: 100 }, (_, index) => `t${index}`),
+      baselineRuns: [Array.from({ length: 100 }, (_, index) => completed(`t${index}`, index < 100))],
+      candidateRuns: [Array.from({ length: 100 }, (_, index) => completed(`t${index}`, index < 89))],
+    });
+    assert.equal(elevenPointLoss.passRateDelta, -0.11);
+    assert.equal(elevenPointLoss.decision, 'inferior');
+    assert.equal(elevenPointLoss.reason, 'pass_rate_delta_below_non_inferiority_margin');
+  });
+
+  test('uses Wilson/Newcombe lower bound for non-inferiority boundary cases', () => {
+    const onePairTie = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: ['single'],
+      baselineRuns: [[completed('single', true)]],
+      candidateRuns: [[completed('single', true)]],
+    });
+    assert.equal(onePairTie.passRateDelta, 0);
+    assert.equal(onePairTie.nonInferiority.method, 'newcombe_wilson');
+    assert.equal(onePairTie.nonInferiority.lowerBound !== null && onePairTie.nonInferiority.lowerBound < -0.1, true);
+    assert.equal(onePairTie.decision, 'inconclusive');
+    assert.equal(onePairTie.reason, 'non_inferiority_confidence_interval_crosses_margin');
+
+    const tieTaskIds = Array.from({ length: 10 }, (_, index) => `tie-${index}`);
+    const allTieSmallSample = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: tieTaskIds,
+      baselineRuns: [tieTaskIds.map((taskId) => completed(taskId, true))],
+      candidateRuns: [tieTaskIds.map((taskId) => completed(taskId, true))],
+    });
+    assert.equal(allTieSmallSample.passRateDelta, 0);
+    assert.equal(allTieSmallSample.nonInferiority.method, 'newcombe_wilson');
+    assert.equal(allTieSmallSample.nonInferiority.lowerBound !== null && allTieSmallSample.nonInferiority.lowerBound < -0.1, true);
+    assert.equal(allTieSmallSample.decision, 'inconclusive');
+
+    const poweredTaskIds = Array.from({ length: 1000 }, (_, index) => `powered-${index}`);
+    const powered = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: poweredTaskIds,
+      baselineRuns: [poweredTaskIds.map((taskId) => completed(taskId, true))],
+      candidateRuns: [poweredTaskIds.map((taskId, index) => completed(taskId, index < 950))],
+    });
+
+    assert.equal(powered.passRateDelta, -0.05);
+    assert.equal(powered.pairedAttempts.losses, 50);
+    assert.equal(powered.pairedAttempts.ties, 950);
+    assert.equal(powered.nonInferiority.method, 'newcombe_wilson');
+    assert.equal(powered.nonInferiority.lowerBound !== null && powered.nonInferiority.lowerBound >= -0.1, true);
+    assert.equal(powered.decision, 'non_inferior');
+    assert.equal(powered.reason, 'non_inferiority_lower_bound_within_margin');
+
+    const smallTaskIds = Array.from({ length: 20 }, (_, index) => `small-${index}`);
+    const underpowered = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: smallTaskIds,
+      baselineRuns: [smallTaskIds.map((taskId, index) => completed(taskId, index >= 9))],
+      candidateRuns: [smallTaskIds.map((taskId, index) => completed(taskId, index >= 9 && index < 19))],
+    });
+    assert.equal(underpowered.passRateDelta, -0.05);
+    assert.equal(underpowered.nonInferiority.method, 'newcombe_wilson');
+    assert.equal(underpowered.nonInferiority.lowerBound !== null && underpowered.nonInferiority.lowerBound < -0.1, true);
+    assert.equal(underpowered.decision, 'inconclusive');
+    assert.equal(underpowered.reason, 'non_inferiority_confidence_interval_crosses_margin');
+
+    const inferiorTaskIds = Array.from({ length: 100 }, (_, index) => `inferior-${index}`);
+    const inferior = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: inferiorTaskIds,
+      baselineRuns: [inferiorTaskIds.map((taskId, index) => completed(taskId, index >= 44))],
+      candidateRuns: [inferiorTaskIds.map((taskId, index) => completed(taskId, index >= 44 && index < 89))],
+    });
+    assert.equal(inferior.passRateDelta, -0.11);
+    assert.equal(inferior.nonInferiority.method, 'newcombe_wilson');
+    assert.equal(inferior.decision, 'inferior');
+    assert.equal(inferior.reason, 'pass_rate_delta_below_non_inferiority_margin');
+  });
+
+  test('counts baseline timeout and candidate pass as an effective B advantage', () => {
     const result = summarizePromptAbComparison({
       runId: 'ab-run',
       roundId: 'ab-summary',
       baselinePromptId: 'maka-baseline',
       candidatePromptId: 'candidate',
-      evaluationTaskIds: ['t1', 't2'],
-      baselineRuns: [[budgetExhausted('t1'), completed('t2', true)]],
-      candidateRuns: [[completed('t1', true), budgetExhausted('t2')]],
+      evaluationTaskIds: ['t1'],
+      baselineRuns: [[budgetExhausted('t1')]],
+      candidateRuns: [[completed('t1', true)]],
     });
 
     assert.equal(result.baseline.budgetExhausted, 1);
-    assert.equal(result.candidate.budgetExhausted, 1);
-    assert.deepEqual(result.pairedAttempts.budgetDiscordantPairIds, ['t1#r0', 't2#r0']);
+    assert.equal(result.candidate.passed, 1);
+    assert.equal(result.pairedAttempts.wins, 1);
+    assert.deepEqual(result.pairedAttempts.budgetDiscordantPairIds, ['t1#r0']);
     assert.equal(result.decision, 'inconclusive');
-    assert.equal(result.reason, 'asymmetric_budget_exhaustion');
+    assert.equal(result.reason, 'non_inferiority_confidence_interval_crosses_margin');
+  });
+
+  test('counts baseline pass and candidate timeout as an effective B loss', () => {
+    const result = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'maka-baseline',
+      candidatePromptId: 'candidate',
+      evaluationTaskIds: ['t1'],
+      baselineRuns: [[completed('t1', true)]],
+      candidateRuns: [[budgetExhausted('t1')]],
+    });
+
+    assert.equal(result.baseline.passed, 1);
+    assert.equal(result.candidate.budgetExhausted, 1);
+    assert.equal(result.pairedAttempts.losses, 1);
+    assert.deepEqual(result.pairedAttempts.budgetDiscordantPairIds, ['t1#r0']);
+    assert.equal(result.decision, 'inferior');
+    assert.equal(result.reason, 'pass_rate_delta_below_non_inferiority_margin');
+  });
+
+  test('reports budget-discordant refs without blocking a powered non-inferiority decision', () => {
+    const taskIds = Array.from({ length: 100 }, (_, index) => `t${index}`);
+    const result = summarizePromptAbComparison({
+      runId: 'ab-run',
+      roundId: 'ab-summary',
+      baselinePromptId: 'prune-off',
+      candidatePromptId: 'prune-on',
+      evaluationTaskIds: taskIds,
+      baselineRuns: [[budgetExhausted('t0'), ...taskIds.slice(1).map((taskId) => completed(taskId, true))]],
+      candidateRuns: [taskIds.map((taskId) => completed(taskId, true))],
+    });
+
+    assert.deepEqual(result.pairedAttempts.budgetDiscordantPairIds, ['t0#r0']);
+    assert.equal(result.investigationRefs.budgetDiscordantPairs[0]?.pairId, 't0#r0');
+    assert.equal(result.decision, 'non_inferior');
+    assert.equal(result.reason, 'non_inferiority_lower_bound_within_margin');
+    const markdown = renderPromptAbComparisonMarkdown(result);
+    assert.match(markdown, /Budget Discordant Refs/);
+    assert.match(markdown, /t0#r0/);
   });
 });
 
@@ -629,7 +960,7 @@ describe('runPromptAbComparison', () => {
       });
 
       assert.equal(result.candidatePromptId, 'maka-improved-v1');
-      assert.equal(result.decision, 'inconclusive');
+      assert.equal(result.decision, 'non_inferior');
       assert.equal(result.taskLevel.wins, 2);
       assert.deepEqual(calls, [
         'ab-baseline-r0-t1:t1',
@@ -770,6 +1101,49 @@ function completed(taskId: string, passed: boolean): FixedPromptTaskCompletedEve
   };
 }
 
+function withUsage(
+  event: FixedPromptTaskCompletedEvent,
+  usage: {
+    input: number;
+    cacheHitInput: number;
+    cacheMissInput: number;
+    cacheWriteInput: number;
+    output: number;
+    reasoning: number;
+    total: number;
+    costUsd: number;
+    durationMs: number;
+  },
+): FixedPromptTaskCompletedEvent {
+  return {
+    ...event,
+    tokenSummary: {
+      input: usage.input,
+      cachedInput: usage.cacheHitInput,
+      cacheHitInput: usage.cacheHitInput,
+      cacheMissInput: usage.cacheMissInput,
+      cacheWriteInput: usage.cacheWriteInput,
+      cacheMissInputSource: 'explicit',
+      output: usage.output,
+      reasoning: usage.reasoning,
+      total: usage.total,
+      costUsd: usage.costUsd,
+      pricingSource: 'runtime',
+    },
+    durationMs: usage.durationMs,
+  };
+}
+
+function withTrace<T extends FixedPromptTaskCompletedEvent>(event: T, arm: 'A' | 'B', taskId: string): T {
+  return {
+    ...event,
+    id: `event-${arm}-${taskId}-r0`,
+    roundId: `ab-${arm === 'A' ? 'prune-off' : 'prune-on'}-r0-${taskId}`,
+    runtimeEventsPath: `/logs/${arm}/${taskId}/runtime-events.jsonl`,
+    traceEventsPath: `/traces/${arm}/${taskId}/events.jsonl`,
+  };
+}
+
 function budgetExhausted(taskId: string): FixedPromptTaskBudgetExhaustedEvent {
   return {
     schemaVersion: FIXED_PROMPT_WAL_SCHEMA_VERSION,
@@ -786,6 +1160,29 @@ function budgetExhausted(taskId: string): FixedPromptTaskBudgetExhaustedEvent {
     errorClass: 'budget_exhausted',
     error: 'harbor run timed out after 600s',
     expectedPromptHash: 'hash',
+  };
+}
+
+function contextBudgetSummary(
+  input: Partial<NonNullable<FixedPromptTaskCompletedEvent['contextBudgetSummary']>>,
+): NonNullable<FixedPromptTaskCompletedEvent['contextBudgetSummary']> {
+  return {
+    diagnosticEvents: 1,
+    enabledEvents: 1,
+    estimatedTokensBefore: 1000,
+    estimatedTokensAfter: 800,
+    keptTurns: 3,
+    droppedTurns: 1,
+    keptEvents: 8,
+    droppedEvents: 2,
+    prunedToolResults: 0,
+    archivePlaceholders: 0,
+    archiveWriteFailures: 0,
+    retrievedArchiveToolResults: 0,
+    retrievedArchiveEstimatedTokens: 0,
+    archiveRetrievalSkipped: 0,
+    archiveRetrievalFailures: 0,
+    ...input,
   };
 }
 

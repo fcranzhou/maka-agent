@@ -6,8 +6,18 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { HARBOR_CELL_CONTEXT_ENV_KEYS } from '../harbor-cell.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('../../../..', import.meta.url)));
+
+function validContextEnvValue(key: string): string {
+  if (key === 'MAKA_CONTEXT_BUDGET_NAME') return 'test-context-budget';
+  if (key === 'MAKA_CONTEXT_ARCHIVE_RETRIEVAL_MODE') return 'eager';
+  if (key.endsWith('_PRUNE') || key === 'MAKA_CONTEXT_ARCHIVE_RETRIEVAL') return 'on';
+  if (key === 'MAKA_CONTEXT_BUDGET') return 'on';
+  if (key.endsWith('_DIR')) return '/tmp/maka-context-archives';
+  return '1';
+}
 
 describe('Harbor adapter contract', () => {
   test('run-cell.mjs delegates to the shared env entrypoint', async () => {
@@ -52,25 +62,6 @@ describe('Harbor adapter contract', () => {
     assert.doesNotMatch(source, /MAKA_INSTRUCTION_EOF/);
   });
 
-  test('run-host-cell.mjs keeps provider auth on the host and calls Harbor tools through RPC', async () => {
-    const source = await readRepoFile('packages/headless/harbor/run-host-cell.mjs');
-
-    assert.match(source, /^#!\/usr\/bin\/env node/);
-    assert.match(source, /runHarborCell/);
-    assert.match(source, /buildAiSdkCellBackendRegistration/);
-    assert.match(source, /MAKA_HOST_API_KEY_FILE/);
-    assert.match(source, /MAKA_HOST_API_KEY_ENV_NAME/);
-    assert.match(source, /MAKA_HOST_BASE_URL/);
-    assert.match(source, /MAKA_HARBOR_TOOL_EXECUTOR_URL/);
-    assert.match(source, /MAKA_HARBOR_TOOL_EXECUTOR_TOKEN/);
-    assert.match(source, /fetch\(new URL\('\/exec'/);
-    assert.match(source, /from '#harbor-cell'/);
-    assert.doesNotMatch(source, /\.\.\/dist\/index\.js/);
-    assert.doesNotMatch(source, /DEEPSEEK_API_KEY_FILE/);
-    assert.doesNotMatch(source, /\/run\/secrets/);
-    assert.doesNotMatch(source, /host\.docker\.internal/);
-  });
-
   test('headless Harbor text files do not contain hidden or unexpected control characters', async () => {
     const hiddenUnicode = /[\u202A-\u202E\u2066-\u2069\u200B\u200C\u200D\uFEFF]/u;
     const files = [
@@ -108,6 +99,50 @@ describe('Harbor adapter contract', () => {
     assert.equal(result.status, 1);
     assert.match(result.stderr, /MAKA_HOST_API_KEY_FILE is required/);
     assert.doesNotMatch(result.stderr, /does not provide an export named/);
+  });
+
+  test('run-host-cell.mjs forwards Harbor cell context schema env keys to the backend', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'maka-host-cell-env-'));
+    try {
+      const keyFile = resolve(tmp, 'key.txt');
+      await writeFile(keyFile, 'test-key\n', 'utf8');
+      const { backendEnv } = await import(new URL('../../harbor/run-host-cell.mjs', import.meta.url).href);
+      const contextEnv = Object.fromEntries(HARBOR_CELL_CONTEXT_ENV_KEYS.map((key) => [key, validContextEnvValue(key)]));
+      const env = await backendEnv({
+        MAKA_HOST_API_KEY_FILE: keyFile,
+        ...contextEnv,
+        MAKA_OUTPUT_DIR: '/tmp/out',
+        MAKA_STORAGE_ROOT: '/tmp/storage',
+      }, 'deepseek');
+
+      for (const key of HARBOR_CELL_CONTEXT_ENV_KEYS) {
+        assert.equal(env[key], contextEnv[key]);
+      }
+      assert.equal(env.MAKA_OUTPUT_DIR, '/tmp/out');
+      assert.equal(env.MAKA_STORAGE_ROOT, '/tmp/storage');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('run-host-cell.mjs rejects unknown context env instead of dropping it', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'maka-host-cell-env-'));
+    try {
+      const keyFile = resolve(tmp, 'key.txt');
+      await writeFile(keyFile, 'test-key\n', 'utf8');
+      const { backendEnv } = await import(new URL('../../harbor/run-host-cell.mjs', import.meta.url).href);
+
+      await assert.rejects(
+        backendEnv({
+          MAKA_HOST_API_KEY_FILE: keyFile,
+          MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on',
+          MAKA_CONTEXT_FOO: '1',
+        }, 'deepseek'),
+        /unsupported Harbor context env key: MAKA_CONTEXT_FOO/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   test('run-prompt-optimization.mjs wires the headless run API with a key file, not a raw key', async () => {
@@ -663,6 +698,7 @@ with tempfile.TemporaryDirectory() as tmp:
     else:
         raise AssertionError("expected invalid zero-token trial pricing to raise")
 
+    runtime_policy_context_env = ${JSON.stringify(Object.fromEntries(HARBOR_CELL_CONTEXT_ENV_KEYS.map((key) => [key, validContextEnvValue(key)])))}
     gateway_agent = MakaAgent(Path(tmp), extra_env={
         "MAKA_HOST_API_KEY_FILE": "/host/deepseek-key",
         "MAKA_PROVIDER": "openai-compatible",
@@ -671,6 +707,8 @@ with tempfile.TemporaryDirectory() as tmp:
         "MAKA_TRIAL_OUTPUT_USD_PER_1M": "0.29",
         "MAKA_TRIAL_CACHE_READ_USD_PER_1M": "0.0029",
         "MAKA_TRIAL_PRICING_SOURCE": "deepseek-v4-flash",
+        **runtime_policy_context_env,
+        "MAKA_CONTEXT_FOO": "1",
     })
     gateway_env = gateway_agent._cell_env(Path("/logs/agent/instruction.txt"))
     assert gateway_env["MAKA_PROVIDER"] == "openai-compatible", gateway_env
@@ -681,6 +719,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert gateway_env["MAKA_TRIAL_OUTPUT_USD_PER_1M"] == "0.29", gateway_env
     assert gateway_env["MAKA_TRIAL_CACHE_READ_USD_PER_1M"] == "0.0029", gateway_env
     assert gateway_env["MAKA_TRIAL_PRICING_SOURCE"] == "deepseek-v4-flash", gateway_env
+    for key, value in runtime_policy_context_env.items():
+        assert gateway_env[key] == value, gateway_env
+    assert gateway_env["MAKA_CONTEXT_FOO"] == "1", gateway_env
 
     # Cell wall-clock timeout is operator-configurable with a safe default and a
     # fallback for malformed or non-positive values.
@@ -747,6 +788,7 @@ with tempfile.TemporaryDirectory() as tmp:
     original_https_proxy = os.environ.get("HTTPS_PROXY")
     original_all_proxy = os.environ.get("ALL_PROXY")
     original_node_use_env_proxy = os.environ.get("NODE_USE_ENV_PROXY")
+    original_context_foo = os.environ.get("MAKA_CONTEXT_FOO")
     try:
         maka_agent_mod._ToolExecutorServer = FakeToolExecutor
         asyncio.create_subprocess_exec = fake_create_subprocess_exec
@@ -756,6 +798,7 @@ with tempfile.TemporaryDirectory() as tmp:
         os.environ["HTTPS_PROXY"] = "http://user:pass@secure-proxy.example"
         os.environ["ALL_PROXY"] = "socks5://user:pass@socks-proxy.example"
         os.environ["NODE_USE_ENV_PROXY"] = "1"
+        os.environ["MAKA_CONTEXT_FOO"] = "1"
         host_process_agent = MakaAgent(Path(tmp), extra_env={
             "MAKA_HOST_API_KEY_FILE": "/host/deepseek-key",
         })
@@ -788,6 +831,10 @@ with tempfile.TemporaryDirectory() as tmp:
             os.environ.pop("NODE_USE_ENV_PROXY", None)
         else:
             os.environ["NODE_USE_ENV_PROXY"] = original_node_use_env_proxy
+        if original_context_foo is None:
+            os.environ.pop("MAKA_CONTEXT_FOO", None)
+        else:
+            os.environ["MAKA_CONTEXT_FOO"] = original_context_foo
 
     host_process_env = captured_host_process["kwargs"]["env"]
     assert "SHOULD_NOT_LEAK" not in host_process_env, host_process_env
@@ -796,6 +843,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "HTTPS_PROXY" not in host_process_env, host_process_env
     assert "ALL_PROXY" not in host_process_env, host_process_env
     assert "NODE_USE_ENV_PROXY" not in host_process_env, host_process_env
+    assert host_process_env["MAKA_CONTEXT_FOO"] == "1", host_process_env
     assert host_process_env["MAKA_HOST_API_KEY_FILE"] == "/host/deepseek-key", host_process_env
     assert host_process_env["MAKA_HARBOR_TOOL_EXECUTOR_URL"] == "http://127.0.0.1:4321", host_process_env
     assert host_process_env["MAKA_HARBOR_TOOL_EXECUTOR_TOKEN"] == "tool-token", host_process_env

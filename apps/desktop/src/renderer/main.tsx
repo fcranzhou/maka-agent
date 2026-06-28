@@ -93,7 +93,11 @@ import {
 import { deriveTurnFooterActions } from './turn-footer-actions';
 import { readScrollMotionBehavior } from './scroll-motion-policy';
 import { deriveBranchBanner } from './branch-banner';
-import { buildCatalogChatModelChoices, buildCatalogDailyReviewModelOptions } from './model-catalog-choices';
+import {
+  buildCatalogChatModelChoices,
+  buildCatalogDailyReviewModelOptions,
+  pickCatalogDefaultChatModel,
+} from './model-catalog-choices';
 import { applyTheme, applyThemePalette, applyUiLocale } from './theme';
 import { openPathActionLabel, openPathFailureCopy } from './open-path';
 import {
@@ -513,11 +517,10 @@ function AppShell() {
     )
       ? pendingNewChatModel
       : null;
-  const defaultConnModel = defaultConnectionEntry?.defaultModel || defaultConnectionEntry?.models?.[0]?.id;
-  const newChatModel = validPendingNewChatModel
-    ?? (defaultConnectionEntry && defaultConnModel
-      ? { llmConnectionSlug: defaultConnectionEntry.slug, model: defaultConnModel }
-      : undefined);
+  const catalogDefaultNewChatModel = defaultConnectionEntry
+    ? pickCatalogDefaultChatModel(defaultConnectionEntry)
+    : undefined;
+  const newChatModel = validPendingNewChatModel ?? catalogDefaultNewChatModel;
   const activeConnectionLabel = activeSession?.backend === 'fake'
     ? '本地模拟连接'
     : activeConnection?.name ?? activeSession?.llmConnectionSlug;
@@ -3170,10 +3173,6 @@ function AppShell() {
                 modelLabel={
                   activeModelLabel
                   ?? newChatModelLabel
-                  ?? chatModelChoiceLabel(chatModelChoices, activeConnection?.slug, activeConnection?.defaultModel)
-                  ?? chatModelChoiceLabel(chatModelChoices, activeConnection?.slug, activeConnection?.models?.[0]?.id)
-                  ?? chatModelChoiceLabel(chatModelChoices, defaultConnectionEntry?.slug, defaultConnectionEntry?.defaultModel)
-                  ?? chatModelChoiceLabel(chatModelChoices, defaultConnectionEntry?.slug, defaultConnectionEntry?.models?.[0]?.id)
                   ?? undefined
                 }
                 activeSession={activeSessionForView}

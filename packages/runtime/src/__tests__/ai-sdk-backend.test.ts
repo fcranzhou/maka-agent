@@ -37,6 +37,7 @@ import {
   type SynthesisCacheBlock,
 } from '../context-budget.js';
 import { buildRuntimeEventModelReplayPlan } from '../model-history.js';
+import type { ActiveFullCompactBlock } from '../active-full-compact.js';
 
 describe('AiSdkBackend model history', () => {
   test('prefers RuntimeEvent prior messages and appends current user once', async () => {
@@ -1805,11 +1806,16 @@ describe('AiSdkBackend usage telemetry', () => {
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
     const llmRecords: LlmCallRecord[] = [];
+    const recordedBlocks: ActiveFullCompactBlock[] = [];
     const largeBody = 'ACTIVE_FULL_COMPACT_RAW_TOOL_OUTPUT'.repeat(200);
     let streamCalls = 0;
+    let secondProviderRequestSawRecordedBlock = false;
     const model = new MockLanguageModelV3({
       doStream: async () => {
         streamCalls += 1;
+        if (streamCalls === 2) {
+          secondProviderRequestSawRecordedBlock = recordedBlocks.length === 1;
+        }
         const chunks: LanguageModelV3StreamPart[] = streamCalls === 1
           ? [
               { type: 'stream-start', warnings: [] },
@@ -1868,13 +1874,23 @@ describe('AiSdkBackend usage telemetry', () => {
       recordLlmCall: (record) => {
         llmRecords.push(record);
       },
+      recordActiveFullCompactBlock: (block) => {
+        recordedBlocks.push(block);
+      },
     });
 
     for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
       events.push(event);
     }
+    await Promise.resolve();
 
     assert.equal(streamCalls, 2);
+    assert.equal(recordedBlocks.length, 1);
+    assert.equal(secondProviderRequestSawRecordedBlock, true);
+    assert.equal(recordedBlocks[0]?.kind, 'maka.active_full_compact_block');
+    assert.equal(recordedBlocks[0]?.turnId, 'turn-1');
+    assert.equal((recordedBlocks[0]?.sourceRefs.length ?? 0) > 0, true);
+    assert.match(JSON.stringify(recordedBlocks[0]), /artifact-tool-1/);
     const secondPromptMessages = model.doStreamCalls[1]?.prompt ?? [];
     const secondPrompt = JSON.stringify(model.doStreamCalls[1]?.prompt.map((message) => ({
       role: message.role,
@@ -1913,6 +1929,32 @@ describe('AiSdkBackend usage telemetry', () => {
         contextBudget?.highWaterRequestShapeHashBefore,
       );
     }
+  });
+
+  test('active full compact durable recorder is invoked synchronously', () => {
+    const recordedBlocks: ActiveFullCompactBlock[] = [];
+    const backend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
+      modelFactory: () => completionModel(),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+      recordActiveFullCompactBlock: (block) => {
+        recordedBlocks.push(block);
+      },
+    });
+    (backend as unknown as {
+      recordActiveFullCompactBlock(block: ActiveFullCompactBlock): void;
+    }).recordActiveFullCompactBlock(activeFullCompactBlockFixture());
+
+    assert.equal(recordedBlocks.length, 1);
+    assert.equal(recordedBlocks[0]?.blockId, 'afcompact-sync-test');
   });
 
   test('active full compact keeps the accepted boundary projection across later AI SDK steps', async () => {
@@ -4230,6 +4272,48 @@ function compactPrompt(model: MockLanguageModelV3): unknown {
     role: message.role,
     content: message.content,
   }));
+}
+
+function activeFullCompactBlockFixture(): ActiveFullCompactBlock {
+  return {
+    kind: 'maka.active_full_compact_block',
+    version: 1,
+    blockId: 'afcompact-sync-test',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    createdAt: 1_001,
+    highWaterName: 'sync-test',
+    highWaterSeq: 1,
+    trigger: {
+      reason: 'manual_test',
+      stepNumber: 2,
+      estimatedTokensBefore: 100,
+      thresholdTokens: 50,
+    },
+    coverage: {
+      turnIds: ['turn-1'],
+      runtimeEventIds: ['runtime-event-1'],
+      providerMessageSourceIds: ['provider-message:0'],
+      toolCallIds: [],
+      contentKinds: ['text'],
+      bodySha256: ['sha256-sync-test'],
+    },
+    summary: {
+      schemaVersion: 1,
+      text: 'persist synchronously before the next provider request',
+    },
+    limitations: [],
+    sourceRefs: [{
+      kind: 'provider_message',
+      sourceId: 'provider-message:0',
+      messageIndex: 0,
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      runtimeEventId: 'runtime-event-1',
+      contentKind: 'text',
+      bodySha256: 'sha256-sync-test',
+    }],
+  };
 }
 
 function countActiveFullCompactMarkers(text: string): number {

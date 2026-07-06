@@ -289,7 +289,12 @@
 }
 
 .maka-session-panel[data-collapsed="true"] {
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  /* Collapsed rail hides the view-mode toggle (display: none above). A
+     display:none item does NOT participate in grid layout, so reserving a
+     5th row for it drops the footer into the minmax(0, 1fr) track. Keep the
+     4-row layout matching the four participating children
+     (header / nav / list / footer). */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 /* Search modal: input + local thread-search results, backed by
@@ -657,6 +662,10 @@
   display: none;
 }
 
+.maka-session-panel[data-collapsed="true"] .maka-view-mode-toggle {
+  display: none;
+}
+
 .maka-list-stack {
   min-height: 0;
   overflow: hidden;
@@ -688,6 +697,12 @@
   border-top: var(--border-width-hairline) solid oklch(from var(--foreground) l c h / 0.05);
 }
 
+.maka-list-group[data-variant="project"] + .maka-list-group[data-variant="project"] {
+  margin-top: var(--space-3);
+  padding-top: 0;
+  border-top: 0;
+}
+
 /* Group label — section header for session groups. Weight-based
    hierarchy (not uppercase/letter-spacing) so Chinese labels read
    cleanly without artificial tracking. */
@@ -701,6 +716,47 @@
   font-weight: var(--font-weight-semibold);
   font-variant-numeric: tabular-nums;
 }
+
+.maka-list-project-heading {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-1-5);
+  width: 100%;
+  min-height: var(--h-control-lg);
+  padding: 0 var(--space-1-5);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--foreground-secondary);
+  font-size: var(--font-size-ui);
+  font-weight: var(--font-weight-medium);
+  text-align: left;
+}
+
+/* Hover / focus-visible / svg sizing are contributed by UiButton
+   (variant="quiet" size="nav"), matching the status-group header — no
+   bespoke :hover/:focus-visible here. Only the folder-glyph tint +
+   flex-shrink guard remain heading-specific. */
+.maka-list-project-heading svg {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+}
+
+
+.maka-list-project-more {
+  min-height: var(--h-control-lg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--font-size-ui);
+  padding: 0 var(--space-1-5) 0 var(--space-8);
+  text-align: left;
+}
+
 
 /* PR-SIDEBAR-IA-0 Phase 3 (WAWQAQ msgs `14ed98b5`, `761141c5` —
  * "list 很丑、很肥很臃肿"; xuan `6b28984e` sign-off + "32-40px 薄行";

@@ -183,6 +183,25 @@ import { registerDailyReviewIpc } from './daily-review-ipc-main.js';
 import { registerUsageIpc } from './usage-ipc-main.js';
 import { registerWebSearchIpc } from './web-search-ipc-main.js';
 
+// E2E switches must never fire in a packaged build, and must never run against
+// the real user data: a stray MAKA_E2E on a build/dev machine would otherwise
+// swap in the fake backend or hide the window. app.isPackaged is true for
+// asar-packaged builds; MAKA_E2E_USER_DATA_DIR must also be set, so the fake
+// backend can't write test sessions into a real profile if someone sets only
+// MAKA_E2E.
+const isE2e =
+  !app.isPackaged &&
+  process.env.MAKA_E2E === '1' &&
+  !!process.env.MAKA_E2E_USER_DATA_DIR;
+
+// E2E isolation: redirect userData BEFORE the single-instance lock so the
+// lock judges the throwaway dir, not the real user data — otherwise a
+// developer with Maka open makes the E2E process exit as a "second instance".
+// Gated by isE2e (not just the dir env) so a packaged build ignores it.
+if (isE2e && process.env.MAKA_E2E_USER_DATA_DIR) {
+  app.setPath('userData', process.env.MAKA_E2E_USER_DATA_DIR);
+}
+
 // Electron does not enforce single-instance by default. Must run before any
 // workspace/store setup below -- a losing second process exits immediately,
 // before touching shared state. See the 'second-instance' listener below for
@@ -320,10 +339,15 @@ const systemPromptService = createSystemPromptMainService({
   localMemory,
   taskLedger: taskLedgerStore,
 });
+// Window is created hidden for E2E and visual-smoke runs so it never steals
+// focus. Derived from the same isE2e gate as userData/fake-backend so the
+// hidden-window switch stays in lockstep with the rest of the E2E isolation.
+const startHidden = Boolean(visualSmokeFixture) || isE2e;
 const mainWindowController = createMainWindowController({
   workspaceRoot,
   visualSmokeFixture,
   settingsStore,
+  startHidden,
 });
 // Shared by 'second-instance' and 'activate': focus the existing window, or
 // create one if all windows were closed while the app (macOS: still in the
@@ -674,6 +698,17 @@ function weChatQrFailureMessage(error: unknown): string {
 backends.register('fake', (ctx) =>
   new FakeBackend({ sessionId: ctx.sessionId, header: ctx.header, store: ctx.store, appendMessage: ctx.appendMessage }),
 );
+
+// E2E: also route 'ai-sdk' (requested by sessions:create and quickChat:start)
+// through the deterministic fake backend, so no session-creation path can
+// escape the E2E seam and hit a real provider. Registered after the real
+// ai-sdk factory to override it (BackendRegistry uses last-write-wins).
+// Production builds never set MAKA_E2E.
+if (isE2e) {
+  backends.register('ai-sdk', (ctx) =>
+    new FakeBackend({ sessionId: ctx.sessionId, header: ctx.header, store: ctx.store, appendMessage: ctx.appendMessage }),
+  );
+}
 
 const runtime = new SessionManager({
   store,
@@ -1793,11 +1828,11 @@ app.whenReady().then(async () => {
   // builds get the icon via .app bundle Info.plist; this covers the
   // dev path.
   if (process.platform === 'darwin' && app.dock) {
-    if (process.env.MAKA_VISUAL_SMOKE_FIXTURE) {
+    if (process.env.MAKA_VISUAL_SMOKE_FIXTURE || isE2e) {
       // PR-VISUAL-SMOKE-HEADLESS: hide the dock icon so the spawned
       // Electron runs as an accessory app — no dock bounce, and it
       // never becomes frontmost / steals focus from the developer's
-      // active window during a capture run.
+      // active window during a capture run or an E2E run.
       app.dock.hide();
     } else {
       try {

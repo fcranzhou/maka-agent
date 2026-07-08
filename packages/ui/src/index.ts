@@ -109,3 +109,32 @@ export type { BadgeProps } from './primitives/badge.js';
 // / destructive.
 export { Chip, chipVariants } from './primitives/chip.js';
 export type { ChipProps } from './primitives/chip.js';
+// Streaming UI rework: Codex-style tool "trow" grouping helpers. Pure bucketing
+// + summary used by the timeline tool renderer (ToolTrow) and unit-tested.
+export {
+  summarizeTrowTools,
+  trowActivityKind,
+  activeTrowTool,
+  isTrowRunning,
+  trowNeedsAttention,
+  type TrowActivityKind,
+} from './tool-activity/trow-summary.js';
+// Streaming UI rework: per-word fade-in for streamed text (replaces the ▎
+// caret). Pure append-record ring + tokenizer are unit-tested; the hook feeds
+// markdown-body's rehype pass.
+export {
+  useStreamFade,
+  tokenizeFade,
+  streamFadeRehypePlugin,
+  updateFadeRing,
+  createFadeRing,
+  fadeBoundary,
+  fadeAgeAt,
+  FADE_MS,
+  MAX_FADE_BATCHES,
+  type StreamFade,
+  type FadeToken,
+  type FadeRingState,
+  type FadeBatch,
+  type HastNode,
+} from './stream-fade.js';

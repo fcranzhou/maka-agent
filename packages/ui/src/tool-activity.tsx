@@ -1,12 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ComponentType } from 'react';
 import { type ToolResultContent } from '@maka/core';
-import { AlertOctagon, Check, Clock, Copy, Repeat, X } from './icons.js';
+import {
+  AlertOctagon,
+  Check,
+  ChevronRight,
+  Clock,
+  Copy,
+  FileText,
+  Globe,
+  Repeat,
+  Search,
+  Settings,
+  SquarePen,
+  Terminal,
+  X,
+  type LucideProps,
+} from './icons.js';
 import { useClipboardCopyFeedback } from './clipboard-feedback.js';
 import { detectUiLocale } from './locale-helpers.js';
 import { type ToolActivityItem, type ToolOutputChunk } from './materialize.js';
+import {
+  activeTrowTool,
+  isTrowRunning,
+  summarizeTrowTools,
+  trowActivityKind,
+  trowNeedsAttention,
+  type TrowActivityKind,
+} from './tool-activity/trow-summary.js';
 import { Alert, AlertAction, AlertDescription, AlertTitle } from './primitives/alert.js';
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from './primitives/collapsible.js';
-import { LiveIndicator, previewVariants, streamVariants, toolVariants } from './primitives/chat.js';
+import { LiveIndicator, previewVariants, streamVariants, TextShimmer, toolVariants } from './primitives/chat.js';
 import { redactSecrets } from './redact.js';
 import { Button as UiButton, cn } from './ui.js';
 import { describeLoadToolResult, formatRedactedJson, formatToolIntent, loadToolDisplayName } from './tool-format.js';
@@ -176,6 +199,20 @@ function isPermissionDeniedToolResult(result: ToolActivityItem['result']): boole
   return result?.kind === 'text' && formatUserVisibleToolText(result.text).trim() === '用户已拒绝权限请求';
 }
 
+/**
+ * Pull the shell command string out of a command-tool's args (bash / shell).
+ * Used to render a single `$ <command>` invocation line while the tool is in
+ * flight — the settled terminal result preview already prints the command in
+ * its header, so this only fills the running gap. Returns undefined for a
+ * non-command shape so the caller falls back to the compact redacted-args view.
+ */
+function extractToolCommand(args: unknown): string | undefined {
+  if (!args || typeof args !== 'object') return undefined;
+  const record = args as Record<string, unknown>;
+  const raw = record.command ?? record.cmd ?? record.script;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw : undefined;
+}
+
 export function ToolActivity(props: { items: ToolActivityItem[] }) {
   return (
     <section className={toolVariants({ part: 'container' })} aria-label="工具调用记录">
@@ -191,9 +228,6 @@ export function ToolActivity(props: { items: ToolActivityItem[] }) {
 }
 
 function ToolActivityCard({ item }: { item: ToolActivityItem }) {
-  const duration = formatDuration(item.durationMs);
-  const errored = item.status === 'errored';
-  const permissionDenied = isPermissionDeniedToolResult(item.result);
   // Controlled open that follows item.status: a card that defaults open while
   // pending/running auto-collapses when it settles to completed/interrupted
   // (restoring the pre-Collapsible native-disclosure behavior, where
@@ -205,6 +239,7 @@ function ToolActivityCard({ item }: { item: ToolActivityItem }) {
   useEffect(() => {
     setOpen(isOpenByDefault(item.status));
   }, [item.status]);
+  const duration = formatDuration(item.durationMs);
   return (
     <Collapsible
       data-slot="tool"
@@ -222,30 +257,203 @@ function ToolActivityCard({ item }: { item: ToolActivityItem }) {
         </span>
       </CollapsibleTrigger>
       <CollapsiblePanel>
-        <div className={toolVariants({ part: 'body' })}>
-          {errored && <ToolErrorBanner result={item.result} />}
-          {item.intent && !permissionDenied && <p className={toolVariants({ part: 'intent' })}>{formatToolIntent(item.intent)}</p>}
-          {item.args !== undefined && !permissionDenied && (
-            <pre className={`maka-code ${toolVariants({ part: 'args' })}`}>{formatRedactedJson(item.args)}</pre>
-          )}
-          {item.outputChunks && item.outputChunks.length > 0 && (
-            <ToolOutputStream
-              chunks={item.outputChunks}
-              live={item.status === 'running' || item.status === 'pending'}
-              interrupted={item.status === 'interrupted'}
-              truncated={item.outputTruncated === true}
-            />
-          )}
-          {item.result && !permissionDenied && (
-            isConnectorTool(item.toolName) && item.result.kind === 'json' ? (
-              <LoadToolResultPreview args={item.args} value={item.result.value} />
-            ) : isCronTool(item.toolName) && item.result.kind === 'json' ? (
-              <CronJobResultPreview toolName={item.toolName} value={item.result.value} />
-            ) : (
-              <ToolResultPreview content={item.result} />
-            )
-          )}
+        <ToolCardBody item={item} />
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+/**
+ * The tool detail body — error banner, intent, args, live output stream, and
+ * result preview — shared by the boxed `ToolActivityCard` and the flat trow
+ * rows. Extracted so the trow can render the same details without the card
+ * frame. Args/intent stay routed through `formatRedactedJson` /
+ * `formatToolIntent` (tool-args-redaction-contract).
+ */
+function ToolCardBody({ item }: { item: ToolActivityItem }) {
+  const errored = item.status === 'errored';
+  const permissionDenied = isPermissionDeniedToolResult(item.result);
+  const running = item.status === 'running' || item.status === 'pending';
+  const command = trowActivityKind(item.toolName) === 'command' ? extractToolCommand(item.args) : undefined;
+  // A terminal result preview already prints `$ cmd` + cwd + exit in its head,
+  // so the invocation line only fills the in-flight gap (and any non-terminal
+  // result). The compact redacted-args fallback still routes through
+  // formatRedactedJson (tool-args-redaction-contract).
+  const resultIsTerminal = item.result?.kind === 'terminal';
+  const showInvocation = !permissionDenied && !resultIsTerminal && (command !== undefined || item.args !== undefined);
+  // While running the live stream is the output; once a structured result
+  // preview exists it is the single quiet output block — never render both
+  // (the old body double-printed stdout as stream + preview).
+  const showLiveStream = !!item.outputChunks && item.outputChunks.length > 0 && (running || !item.result);
+  return (
+    // Flat, left-border-indented detail area — one visual language with the
+    // 深度思考 disclosure body. No nested card frame, no per-row rounded boxes.
+    <div className="mt-1 ml-2 flex flex-col gap-1.5 border-l border-[var(--border)] pl-2.5 pb-1">
+      {errored && <ToolErrorBanner result={item.result} />}
+      {showInvocation && (
+        command !== undefined ? (
+          <code className="[font-family:var(--font-mono)] [font-variant-ligatures:none] text-[length:var(--font-size-caption)] text-[color:var(--foreground-secondary)] [white-space:pre-wrap] [word-break:break-word]">
+            <span className="select-none text-[color:var(--muted-foreground)]">$ </span>
+            {redactSecrets(command)}
+          </code>
+        ) : (
+          <pre className="m-0 max-h-40 overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-[length:var(--font-size-caption)] leading-normal text-[color:var(--foreground-secondary)] [white-space:pre-wrap] [word-break:break-word]">{formatRedactedJson(item.args)}</pre>
+        )
+      )}
+      {showLiveStream && (
+        <ToolOutputStream
+          chunks={item.outputChunks!}
+          live={running}
+          interrupted={item.status === 'interrupted'}
+          truncated={item.outputTruncated === true}
+        />
+      )}
+      {item.result && !permissionDenied && (
+        isConnectorTool(item.toolName) && item.result.kind === 'json' ? (
+          <LoadToolResultPreview args={item.args} value={item.result.value} />
+        ) : isCronTool(item.toolName) && item.result.kind === 'json' ? (
+          <CronJobResultPreview toolName={item.toolName} value={item.result.value} />
+        ) : (
+          <ToolResultPreview content={item.result} />
+        )
+      )}
+    </div>
+  );
+}
+
+// Per-bucket icon for a trow's summary row + flat tool rows. Kept here (not in
+// the pure summary module) because icons are React components.
+const TROW_KIND_ICON: Record<TrowActivityKind, ComponentType<LucideProps>> = {
+  read: FileText,
+  search: Search,
+  websearch: Globe,
+  webfetch: Globe,
+  edit: SquarePen,
+  command: Terminal,
+  explore: Search,
+  browser: Globe,
+  tool: Settings,
+};
+
+function trowKindIcon(toolName: string): ComponentType<LucideProps> {
+  return TROW_KIND_ICON[trowActivityKind(toolName)];
+}
+
+/**
+ * Codex-style tool trow (streaming UI rework): one contiguous run of tool
+ * activity rendered as a single flat, borderless disclosure — replacing the
+ * boxed "工具调用 N" card stack inside a turn. A single-tool group is just that
+ * tool's own row (no double nesting); a multi-tool group adds a summary line
+ * (shimmering active-tool description while running; bucketed counts once
+ * settled) that expands to the flat-stacked tool rows.
+ */
+export function ToolTrow({ items }: { items: ToolActivityItem[] }) {
+  if (items.length === 0) return null;
+  if (items.length === 1) return <ToolTrowRow item={items[0]!} />;
+  return <ToolTrowGroup items={items} />;
+}
+
+function ToolTrowGroup({ items }: { items: ToolActivityItem[] }) {
+  const running = isTrowRunning(items);
+  const attention = trowNeedsAttention(items);
+  const active = activeTrowTool(items) ?? items[0]!;
+  // Controlled open: default collapsed, but a waiting_permission or errored
+  // tool forces the group open — a permission prompt must not hide behind the
+  // summary line, and an error banner must stay diagnosable (the old boxed
+  // cards kept errored tools expanded). The user's manual collapse sticks
+  // while `attention` stays true. No defaultOpen
+  // (disclosure-collapsible-contract) — controlled open re-syncs from status,
+  // like ToolActivityCard.
+  const [open, setOpen] = useState(attention);
+  useEffect(() => {
+    if (attention) setOpen(true);
+  }, [attention]);
+  const hasError = items.some((item) => item.status === 'errored');
+  const SummaryIcon = trowKindIcon(active.toolName);
+  const summary = running
+    ? formatUserVisibleToolText(active.intent ?? '') || resolveToolDisplayName(active)
+    : summarizeTrowTools(items);
+  return (
+    <Collapsible className="flex flex-col" data-trow="group" open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="group flex w-full items-center gap-2 py-0.5 text-left">
+        <SummaryIcon size={16} strokeWidth={1.75} aria-hidden="true" className={cn('shrink-0', hasError ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]')} />
+        {running ? (
+          <TextShimmer active={running} className="min-w-0 truncate text-[length:var(--font-size-base)]">{summary}</TextShimmer>
+        ) : (
+          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', hasError ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]')}>{summary}</span>
+        )}
+        <ChevronRight
+          size={14}
+          strokeWidth={2}
+          aria-hidden="true"
+          className="ml-auto shrink-0 text-[color:var(--muted-foreground)] opacity-0 [transition:transform_var(--duration-quick)_var(--ease-out-strong),opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover:opacity-100 group-data-[panel-open]:rotate-90 group-data-[panel-open]:opacity-100"
+        />
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        <div className="mt-0.5 ml-2 flex flex-col gap-0.5 border-l border-[var(--border)] pl-2.5">
+          {items.map((item) => (
+            <ToolTrowRow key={item.toolUseId} item={item} />
+          ))}
         </div>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+/**
+ * A single flat, borderless tool row inside a trow (or a whole single-tool
+ * trow). A caption/mono weak-color header (status dot + name + duration/status)
+ * expands to the shared `ToolCardBody`. Controlled open by status —
+ * waiting_permission / running / errored open, settled collapsed — so a
+ * permission prompt is never hidden. No card frame (`toolVariants({item})`),
+ * per the flat trow visual language.
+ */
+function ToolTrowRow({ item }: { item: ToolActivityItem }) {
+  const [open, setOpen] = useState(isOpenByDefault(item.status));
+  useEffect(() => {
+    setOpen(isOpenByDefault(item.status));
+  }, [item.status]);
+  const duration = formatDuration(item.durationMs);
+  const running = item.status === 'running' || item.status === 'pending' || item.status === 'waiting_permission';
+  const errored = item.status === 'errored';
+  const RowIcon = trowKindIcon(item.toolName);
+  // One row language with the multi-tool summary row: a kind icon + a
+  // user-language phrase, never the old status-dot + mono tool-name + status
+  // word. Running shimmers the model's intent (or the friendly tool name);
+  // settled prefers the intent, falls back to the display name.
+  const runningSummary = formatUserVisibleToolText(item.intent ?? '') || resolveToolDisplayName(item);
+  const summaryTone = errored ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]';
+  return (
+    <Collapsible className="flex flex-col" data-trow="row" data-status={item.status} open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="group flex w-full items-center gap-2 py-0.5 text-left">
+        <RowIcon
+          size={16}
+          strokeWidth={1.75}
+          aria-hidden="true"
+          className={cn('shrink-0', errored ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]')}
+        />
+        {running ? (
+          <TextShimmer active={running} className="min-w-0 truncate text-[length:var(--font-size-base)]">{runningSummary}</TextShimmer>
+        ) : item.intent ? (
+          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', summaryTone)}>{formatToolIntent(item.intent)}</span>
+        ) : (
+          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', summaryTone)}>{resolveToolDisplayName(item)}</span>
+        )}
+        {/* Quiet meta: the duration + chevron ride in on hover / open, matching
+            the multi-tool summary row — status is carried by the shimmer /
+            destructive tint, so no always-on status word. */}
+        <span className="ml-auto inline-flex shrink-0 items-center gap-2 text-[length:var(--font-size-caption)] text-[color:var(--muted-foreground)] opacity-0 [transition:opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover:opacity-100 group-data-[panel-open]:opacity-100">
+          {duration && <span className="[font-variant-numeric:tabular-nums]">{duration}</span>}
+          <ChevronRight
+            size={14}
+            strokeWidth={2}
+            aria-hidden="true"
+            className="[transition:transform_var(--duration-quick)_var(--ease-out-strong)] group-data-[panel-open]:rotate-90"
+          />
+        </span>
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        <ToolCardBody item={item} />
       </CollapsiblePanel>
     </Collapsible>
   );

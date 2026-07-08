@@ -294,7 +294,7 @@ const streamVariants = cva("", {
       // `word-break:break-word` stays an arbitrary literal (Tailwind's
       // `break-words` is `overflow-wrap`, a different property).
       body:
-        "m-0 max-h-55 overflow-y-auto whitespace-pre-wrap [word-break:break-word] px-2.5 py-2 [font-family:var(--font-mono)] text-xs leading-normal bg-[var(--background)] text-[color:var(--foreground-secondary)] [scroll-behavior:auto]",
+        "m-0 max-h-55 overflow-y-auto whitespace-pre-wrap [word-break:break-word] px-2.5 py-2 [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs leading-normal bg-[var(--background)] text-[color:var(--foreground-secondary)] [scroll-behavior:auto]",
       // `.maka-tool-output-stream-chunk` (`display:contents`; recolors stderr,
       // dims redacted). The call site keeps `data-stream` / `data-redacted`.
       chunk:
@@ -343,6 +343,58 @@ export function LiveIndicator({
         className,
       )}
     />
+  );
+}
+
+/**
+ * `TextShimmer` — a running "sweep of light" across short label text
+ * (streaming UI rework). Used for the "深度思考" disclosure title while
+ * reasoning streams and for a working trow's active-tool summary.
+ *
+ * Two overlaid layers on the same grid cell: an opaque `base` (keeps the text
+ * readable at all times, and is all a snapshot / reduced-motion user sees) and
+ * a `sweep` layer whose animated linear-gradient is clipped to the glyph shape
+ * (`background-clip: text` + transparent fill) so a light band travels across
+ * the letters. The band motion is the one declaration that can't be a leaf
+ * literal — it rides the governed `@keyframes maka-text-shimmer` in
+ * maka-tokens.css (like `LiveIndicator`'s `maka-pulse`) plus the literal
+ * utilities here.
+ *
+ * `active={false}` (or reduced-motion) renders just the base text — callers
+ * pass `active` false for settled/snap states so the sweep never runs in a
+ * deterministic capture. Kept INTERNAL (off the package barrel, imported by
+ * relative path) like `LiveIndicator` — its only consumers live in `@maka/ui`.
+ */
+export function TextShimmer({
+  children,
+  active = true,
+  className,
+}: {
+  children: React.ReactNode;
+  active?: boolean;
+  className?: string;
+}): React.ReactElement {
+  if (!active) {
+    return <span className={cn("inline-block", className)}>{children}</span>;
+  }
+  return (
+    <span data-slot="text-shimmer" className={cn("relative inline-grid", className)}>
+      {/* Base: opaque, muted, always readable. */}
+      <span className="[grid-area:1/1] text-[color:var(--muted-foreground)]">{children}</span>
+      {/* Sweep: a clipped light band that travels across the glyphs. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "[grid-area:1/1] bg-clip-text [-webkit-text-fill-color:transparent] text-transparent",
+          "bg-[linear-gradient(100deg,transparent_30%,oklch(from_var(--foreground)_l_c_h_/_0.95)_50%,transparent_70%)]",
+          "[background-size:200%_100%] [background-position:150%_0]",
+          "[animation:maka-text-shimmer_1.8s_linear_infinite]",
+          "motion-reduce:[animation:none] motion-reduce:opacity-0",
+        )}
+      >
+        {children}
+      </span>
+    </span>
   );
 }
 
@@ -517,7 +569,7 @@ const previewVariants = cva("", {
       // overlay preview shares. `white-space` / `font-family` are arbitrary so
       // the structured-card kind parts override them by tailwind-merge (note 1).
       overlay:
-        "mt-1 mx-0 mb-0 max-h-[180px] overflow-auto [font-family:var(--font-mono)] text-xs [white-space:pre-wrap] [word-break:break-word]",
+        "mt-1 mx-0 mb-0 max-h-[180px] overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs [white-space:pre-wrap] [word-break:break-word]",
       // `.maka-overlay-close` — the dismiss action (layered over `.maka-button`).
       close:
         "justify-self-end inline-flex items-center gap-1 min-h-6 px-1.5",
@@ -533,7 +585,7 @@ const previewVariants = cva("", {
         + " [&_code]:text-[color:var(--foreground-secondary)] [&_code]:bg-transparent",
       // `.maka-tool-diff-body` — the scrolling mono `<pre>`.
       "diff-body":
-        "m-0 px-0 py-1 max-h-80 overflow-auto [font-family:var(--font-mono)] text-xs leading-snug [white-space:pre] [word-break:normal]",
+        "m-0 px-0 py-1 max-h-80 overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs leading-snug [white-space:pre] [word-break:normal]",
       // `.maka-tool-diff-line` (+ the `[data-line]` add/del/hunk/meta/ctx tints).
       "diff-line":
         "block px-2 py-0 [white-space:pre]"
@@ -549,7 +601,7 @@ const previewVariants = cva("", {
         "grid gap-0 p-0 rounded-[var(--radius-surface)] bg-[var(--background)] [white-space:normal] [box-shadow:var(--shadow-minimal-flat)]",
       // `.maka-tool-terminal-head`
       "terminal-head":
-        "flex flex-wrap items-center gap-1.5 px-2 py-1 [border-bottom:1px_solid_var(--border)] bg-[var(--foreground-2)] [font-family:var(--font-mono)] text-xs",
+        "flex flex-wrap items-center gap-1.5 px-2 py-1 [border-bottom:1px_solid_var(--border)] bg-[var(--foreground-2)] [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs",
       // `.maka-tool-terminal-cwd`
       "terminal-cwd": "text-[color:var(--muted-foreground)] bg-transparent",
       // `.maka-tool-terminal-cmd` — the ellipsized command line.
@@ -565,7 +617,7 @@ const previewVariants = cva("", {
         "m-0 p-2 text-[color:var(--muted-foreground)] [font-family:var(--font-mono)] text-xs italic",
       // `.maka-tool-terminal-stream` (+ the `[data-stream]` stdout/stderr tone).
       "terminal-stream":
-        "m-0 px-2 py-1.5 max-h-[180px] overflow-auto [font-family:var(--font-mono)] text-xs [white-space:pre-wrap] [word-break:break-word]"
+        "m-0 px-2 py-1.5 max-h-[180px] overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs [white-space:pre-wrap] [word-break:break-word]"
         + " data-[stream=stdout]:text-[color:var(--foreground)]"
         + " data-[stream=stderr]:[border-top:1px_solid_var(--border)] data-[stream=stderr]:bg-[oklch(from_var(--destructive)_l_c_h_/_0.04)] data-[stream=stderr]:text-[color:var(--destructive)]",
       // `.maka-tool-terminal-truncated-note` (+ its `> span` min-width reset).
@@ -596,7 +648,7 @@ const previewVariants = cva("", {
         "m-0 text-[color:var(--muted-foreground)] [font-family:var(--font-mono)] text-xs italic",
       // `.maka-office-document-stream` (+ the `[data-stream=stderr]` tone).
       "office-stream":
-        "m-0 px-2.5 py-2 max-h-50 overflow-auto [border:1px_solid_var(--foreground-10)] rounded-[var(--radius-control)] bg-[var(--background)] [font-family:var(--font-mono)] text-xs [white-space:pre-wrap] [word-break:break-word]"
+        "m-0 px-2.5 py-2 max-h-50 overflow-auto [border:1px_solid_var(--foreground-10)] rounded-[var(--radius-control)] bg-[var(--background)] [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs [white-space:pre-wrap] [word-break:break-word]"
         + " data-[stream=stderr]:bg-[oklch(from_var(--destructive)_l_c_h_/_0.04)] data-[stream=stderr]:text-[color:var(--destructive)]",
 
       // ── explore agent / subagent (shared shell) ───────────────────────────

@@ -20,13 +20,12 @@ import { useClipboardCopyFeedback } from './clipboard-feedback.js';
 import { detectUiLocale } from './locale-helpers.js';
 import { type ToolActivityItem, type ToolOutputChunk } from './materialize.js';
 import {
-  activeTrowTool,
   isTrowRunning,
   summarizeTrowTools,
   trowNeedsAttention,
   type TrowActivityKind,
 } from './tool-activity/trow-summary.js';
-import { deriveToolRowMotion, isToolRowRunning } from './tool-activity/tool-row-motion.js';
+import { isToolRowRunning, isToolRowSettled } from './tool-activity/tool-row-motion.js';
 import {
   createToolDisclosureState,
   deriveToolActivityPresentation,
@@ -464,13 +463,15 @@ const TROW_KIND_ICON: Record<TrowActivityKind, ComponentType<LucideProps>> = {
   tool: Settings,
 };
 
-// #646 run→done seam: the one-shot settle "landing". Reuses the whitelisted
-// `maka-stream-fade-in` keyframe (opacity 0→1, one-shot `both`) — no new keyframe
-// (design-406 governance) — and rides `var(--duration-emphasized)` /
-// `var(--ease-out-strong)` so it converges with the motion tokens. Applied only
-// when `motion.settling` (the row was seen running here and just settled), so a
-// replayed transcript's rows stay static. Auto-frozen under reduced-motion /
-// visual-smoke by the global rules in styles/base.css.
+// #646 run→done seam: the one-shot settle "landing" for the group summary line.
+// Reuses the whitelisted `maka-stream-fade-in` keyframe (opacity 0→1, one-shot
+// `both`) — no new keyframe (design-406 governance) — and rides
+// `var(--duration-emphasized)` / `var(--ease-out-strong)` so it converges with
+// the motion tokens. Applied only when the group was seen running here and
+// just settled, so a replayed transcript's summary stays static. Auto-frozen
+// under reduced-motion / visual-smoke by the global rules in styles/base.css.
+// The per-row seam is a light-band stop (no opacity fade) so parallel tools
+// finishing together don't stack N fades (#tool-jitter).
 const SETTLE_FADE = '[animation:maka-stream-fade-in_var(--duration-emphasized)_var(--ease-out-strong)_both]';
 
 /**
@@ -488,12 +489,16 @@ export function ToolTrow({ items }: { items: ToolActivityItem[] }) {
 function ToolTrowGroup({ items }: { items: ToolActivityItem[] }) {
   const running = isTrowRunning(items);
   const attention = trowNeedsAttention(items);
-  const active = activeTrowTool(items) ?? items[0]!;
-  const activePresentation = deriveToolActivityPresentation(active);
+  // The group's presentation follows the first item (the first-seen bucket the
+  // summary clauses and icon use). The active-tool lookup is gone: a multi-tool
+  // running group shows the whole-group aggregation, a single-tool group's
+  // active tool is items[0] anyway, and disclosure attention is overridden by
+  // the whole-group trowNeedsAttention below.
+  const firstPresentation = deriveToolActivityPresentation(items[0]!);
   // Groups share the same disclosure state as a single row: ordinary work is
   // summarized; a new permission/error state opens diagnostics; manual choice
   // survives ordinary status changes.
-  const disclosure = useToolDisclosure({ ...activePresentation, needsAttention: attention });
+  const disclosure = useToolDisclosure({ ...firstPresentation, needsAttention: attention });
   // #646: a group settles when all its tools do; the settle fade plays only if
   // the group was ever seen running here (not a replayed transcript). The
   // delayed shimmer de-flickers a group whose tools all finish sub-second.
@@ -502,9 +507,18 @@ function ToolTrowGroup({ items }: { items: ToolActivityItem[] }) {
   const settled = !running;
   const settling = settled && everRunningRef.current;
   const hasError = items.some((item) => item.status === 'errored');
-  const SummaryIcon = TROW_KIND_ICON[activePresentation.kind];
+  // #tool-jitter: the group icon stays on the first bucket's kind (the same
+  // first-seen order the summary clauses use), not the active tool's kind — so
+  // a mixed-kind group's icon doesn't flip as the active tool changes mid-run.
+  const SummaryIcon = TROW_KIND_ICON[firstPresentation.kind];
+  // Multi-tool running group shows the whole-group bucket aggregation with a
+  // "正在" prefix instead of the active tool's description, so the summary line
+  // stops cycling through each tool's intent as tools start/finish in
+  // parallel (the 1234567 jitter). Single-tool rows keep the tool's own
+  // description — the "what exactly is running" signal is useful when there is
+  // only one, and it is locked by existing tests.
   const summary = running
-    ? activePresentation.summary
+    ? (items.length > 1 ? summarizeTrowTools(items, { live: true }) : firstPresentation.summary)
     : summarizeTrowTools(items);
   return (
     <Collapsible className="flex flex-col" data-trow="group" data-settled={settled ? 'true' : undefined} open={disclosure.open} onOpenChange={disclosure.setOpen}>
@@ -546,13 +560,12 @@ function ToolTrowRow({ item }: { item: ToolActivityItem }) {
   const presentation = deriveToolActivityPresentation(item);
   const disclosure = useToolDisclosure(presentation);
   const duration = formatDuration(item.durationMs);
-  // #646 run→done seam: `everRunning` is sticky across this row's renders so the
-  // settle fade fires only for a tool that ran here, never for a replayed row
-  // mounted already terminal. The delayed shimmer + one-shot fade share the same
-  // ~200ms window, so a sub-second tool neither sweeps nor lands — it just appears.
-  const everRunningRef = useRef(false);
-  if (isToolRowRunning(item.status)) everRunningRef.current = true;
-  const motion = deriveToolRowMotion({ status: item.status, everRunning: everRunningRef.current });
+  // #tool-jitter: a row settles by its shimmer stopping — the same seam as the
+  // 深度思考 disclosure title (light band → static muted text), with no opacity
+  // fade. Parallel tools finishing together each just drop their light band
+  // instead of stacking N opacity-0→1 fades, so a batch settle no longer 1234567.
+  const running = isToolRowRunning(item.status);
+  const settled = isToolRowSettled(item.status);
   const errored = item.status === 'errored';
   const RowIcon = TROW_KIND_ICON[presentation.kind];
   // One row language with the multi-tool summary row: a kind icon + a
@@ -560,21 +573,20 @@ function ToolTrowRow({ item }: { item: ToolActivityItem }) {
   // word. Running shimmers the model's intent (or the friendly tool name);
   // settled prefers the intent, falls back to the display name.
   const summaryTone = errored ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]';
-  const settleFade = motion.settling ? SETTLE_FADE : undefined;
   return (
-    <Collapsible className="flex flex-col" data-trow="row" data-status={item.status} data-settled={motion.settled ? 'true' : undefined} open={disclosure.open} onOpenChange={disclosure.setOpen}>
+    <Collapsible className="flex flex-col" data-trow="row" data-status={item.status} data-settled={settled ? 'true' : undefined} open={disclosure.open} onOpenChange={disclosure.setOpen}>
       <CollapsibleTrigger className="group flex w-full items-center gap-2 py-0.5 text-left">
         <RowIcon
           size={16}
           aria-hidden="true"
           className={cn('shrink-0', errored ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]')}
         />
-        {motion.shimmer ? (
+        {running ? (
           <TextShimmer active delayed className="min-w-0 truncate text-[length:var(--font-size-base)]">{presentation.summary}</TextShimmer>
         ) : item.intent ? (
-          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', summaryTone, settleFade)}>{formatToolIntent(item.intent)}</span>
+          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', summaryTone)}>{formatToolIntent(item.intent)}</span>
         ) : (
-          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', summaryTone, settleFade)}>{resolveToolDisplayName(item)}</span>
+          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', summaryTone)}>{resolveToolDisplayName(item)}</span>
         )}
         {/* Quiet meta sits right after the label (near the text, not pinned to
             the far edge): duration + chevron ride in on hover / open, matching

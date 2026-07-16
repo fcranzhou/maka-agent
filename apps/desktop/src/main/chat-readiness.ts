@@ -1,13 +1,20 @@
 import {
   isConnectionReady,
+  normalizeOpenAiCodexConnection,
+  normalizeRequestedModelForReadiness,
+  projectSessionSendOutcome,
+  sessionOwnConnectionBlockReason,
+  shouldRebindSessionToDefault,
   type ChatConfigurationReason,
   type LlmConnection,
   type SessionHeader,
 } from '@maka/core';
-import {
-  CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS,
-  PROVIDER_DEFAULTS,
-} from '@maka/core/llm-connections';
+import { PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
+
+// The rebind-eligibility taxonomy moved to `@maka/core/session-send-projection`
+// (#1038) so the send gate and the renderer health notice share one
+// decision source. Re-exported here for back-compat.
+export { shouldRebindSessionToDefault } from '@maka/core';
 
 export const NO_REAL_CONNECTION_CODE = 'NO_REAL_CONNECTION';
 
@@ -73,7 +80,7 @@ export async function requireReadyConnection(
   // expects.
   const normalizedConnection = normalizeOpenAiCodexConnection(connection);
   const apiKey = await deps.getApiKey(normalizedConnection.slug);
-  const normalizedRequestedModel = normalizeRequestedModel(connection, requestedModel);
+  const normalizedRequestedModel = normalizeRequestedModelForReadiness(connection, requestedModel);
   const verdict = isConnectionReady({
     connection: normalizedConnection,
     hasSecret: typeof apiKey === 'string' && apiKey.length > 0,
@@ -88,40 +95,6 @@ export async function requireReadyConnection(
   }
 
   return { connection: normalizedConnection, apiKey: apiKey ?? '', model: verdict.model };
-}
-
-function normalizeOpenAiCodexConnection(connection: LlmConnection): LlmConnection {
-  if (connection.providerType !== 'openai-codex') return connection;
-  const fallbackModels = PROVIDER_DEFAULTS['openai-codex'].fallbackModels;
-  const safeModels = (connection.models ?? []).filter(
-    (entry) => entry.id && !CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS.has(entry.id),
-  );
-  const models = safeModels.length
-    ? safeModels
-    : fallbackModels.map((id) => ({ id }));
-  const enabledModelIds = new Set(models.map((entry) => entry.id));
-  const defaultModel =
-    connection.defaultModel &&
-    !CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS.has(connection.defaultModel) &&
-    enabledModelIds.has(connection.defaultModel)
-      ? connection.defaultModel
-      : models[0]?.id ?? fallbackModels[0] ?? connection.defaultModel;
-  if (models === connection.models && defaultModel === connection.defaultModel) return connection;
-  return { ...connection, defaultModel, models };
-}
-
-function normalizeRequestedModel(
-  connection: LlmConnection,
-  requestedModel: string | undefined,
-): string | undefined {
-  if (
-    connection.providerType === 'openai-codex' &&
-    requestedModel &&
-    CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS.has(requestedModel)
-  ) {
-    return undefined;
-  }
-  return requestedModel;
 }
 
 /**
@@ -185,42 +158,103 @@ export async function ensureSessionCanSendOrRebind(
   header: Pick<SessionHeader, 'backend' | 'llmConnectionSlug' | 'model' | 'connectionLocked'>,
   deps: SessionRebindDeps,
 ): Promise<SessionRebindResult> {
-  try {
+  // #1038: the send/rebind DECISION lives in the core projection so the
+  // renderer health notice answers "will the next send fail?" from the
+  // same facts and the same code. Main resolves the async facts,
+  // delegates the decision, then owns the side effects: the rebind
+  // mutation and the canonical error copy.
+  //
+  // Fact resolution stays staged exactly like the pre-projection send
+  // path (#1038 review): phase 1 resolves only the session's OWN
+  // connection, so a healthy session never waits on — and is never
+  // failed by — unrelated connections, the default store, or the
+  // connection list. Phase 2 gathers rebind candidates only when an
+  // unlocked session actually needs the walk.
+  const ownSlug = header.llmConnectionSlug;
+  const ownResolvable = header.backend !== 'fake' && Boolean(ownSlug) && ownSlug !== 'fake';
+  const ownConnection = ownResolvable ? await deps.readyConnectionDeps.getConnection(ownSlug) : null;
+  const ownHasSecret = ownConnection
+    ? await hasUsableSecret(deps.readyConnectionDeps, ownConnection.slug)
+    : false;
+  const ownReason = sessionOwnConnectionBlockReason(header, ownConnection, () => ownHasSecret);
+
+  if (ownReason === undefined) return { rebound: false };
+
+  if (header.connectionLocked || !shouldRebindSessionToDefault(ownReason)) {
+    // Blocked with no rebind walk. Re-run the throwing authority so the
+    // exact historical error copy surfaces unchanged; if the facts
+    // shifted underneath us (e.g. a key was just saved), the send may
+    // proceed after all.
     await assertSessionCanSend(header, deps.readyConnectionDeps);
     return { rebound: false };
-  } catch (error) {
-    // Once a session has user messages, its connection/model is sticky.
-    // Rebind remains only a recovery path for empty legacy placeholders.
-    if (header.connectionLocked) {
-      throw error;
-    }
-    if (!shouldRebindSessionToDefault(errorReason(error))) {
-      throw error;
-    }
-    const defaultSlug = await deps.getDefaultSlug();
-    const connectionSlugs = await deps.listConnectionSlugs().catch(() => []);
-    let ready: ReadyConnection | undefined;
-    for (const slug of new Set([defaultSlug, ...connectionSlugs])) {
-      try {
-        ready = await requireReadyConnection(slug, deps.readyConnectionDeps);
-        break;
-      } catch {
-        // Try the next persisted connection; the original error wins if none are ready.
-      }
-    }
-    if (!ready) throw error;
-    await deps.updateSession(sessionId, {
-      backend: 'ai-sdk',
-      llmConnectionSlug: ready.connection.slug,
-      model: ready.model,
-      connectionLocked: true,
-    });
-    return {
-      rebound: true,
-      connectionSlug: ready.connection.slug,
-      modelId: ready.model,
-    };
   }
+
+  // Phase 2: rebind candidates, resolved in deterministic order
+  // (default first, then persisted order) with the historical
+  // short-circuit: candidates are probed one at a time and the walk
+  // stops as soon as the projection can decide, so the recovery path
+  // never waits on — nor even probes — later candidates once a ready
+  // one is found (a slow or hanging OAuth refresh on an unrelated
+  // connection cannot stall the send). getDefaultSlug stays
+  // fail-closed (a default-store read error rejects the send rather
+  // than risking a rebind picked from incomplete facts), while the
+  // list read fails open to [] — the default alone can still serve.
+  const [defaultSlug, connectionSlugs] = await Promise.all([
+    deps.getDefaultSlug(),
+    deps.listConnectionSlugs().catch(() => []),
+  ]);
+  const candidateSlugs = [...new Set([defaultSlug, ...connectionSlugs])]
+    .filter((slug): slug is string => typeof slug === 'string' && slug.length > 0);
+  const connections: LlmConnection[] = [];
+  const secretPresence = new Map<string, boolean>();
+  for (const slug of candidateSlugs) {
+    try {
+      const connection = await deps.readyConnectionDeps.getConnection(slug);
+      if (connection) {
+        connections.push(connection);
+        secretPresence.set(connection.slug, await hasUsableSecret(deps.readyConnectionDeps, connection.slug));
+      }
+    } catch {
+      // Unreadable candidate: skipped, exactly like the historical
+      // walk's per-candidate catch.
+    }
+    // Re-run the projection over the resolved prefix. The winner is
+    // identical to a full assembly (the projection picks the FIRST
+    // ready candidate in this same order), but `blocked` here only
+    // means "not yet" — a later candidate may still serve, so only
+    // ready/rebind stop the walk.
+    const outcome = projectSessionSendOutcome({
+      session: header,
+      connections,
+      defaultSlug,
+      hasSecret: (candidateSlug) => secretPresence.get(candidateSlug) === true,
+    });
+
+    if (outcome.kind === 'ready') return { rebound: false }; // facts shifted mid-flight
+
+    if (outcome.kind === 'rebind') {
+      await deps.updateSession(sessionId, {
+        backend: 'ai-sdk',
+        llmConnectionSlug: outcome.connectionSlug,
+        model: outcome.model,
+        connectionLocked: true,
+      });
+      return {
+        rebound: true,
+        connectionSlug: outcome.connectionSlug,
+        modelId: outcome.model,
+      };
+    }
+  }
+
+  // Blocked after the full walk: same canonical-error re-run as above.
+  await assertSessionCanSend(header, deps.readyConnectionDeps);
+  return { rebound: false };
+}
+
+async function hasUsableSecret(deps: ReadyConnectionDeps, slug: string): Promise<boolean> {
+  const apiKey = await deps.getApiKey(slug);
+  return typeof apiKey === 'string' && apiKey.length > 0;
 }
 
 export function chatConfigurationError(message: string, reason: ChatConfigurationReason): Error {
@@ -246,13 +280,4 @@ export function errorReason(error: unknown): string | undefined {
     return String((error as { reason?: unknown }).reason);
   }
   return undefined;
-}
-
-export function shouldRebindSessionToDefault(reason: string | undefined): boolean {
-  return reason === 'fake_backend' ||
-    reason === 'connection_missing' ||
-    reason === 'missing_model' ||
-    reason === 'empty_model_list' ||
-    reason === 'model_not_enabled' ||
-    reason === 'model_not_chat_capable';
 }

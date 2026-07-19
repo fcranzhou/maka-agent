@@ -25,7 +25,8 @@ function resolveRepoRoot(): string {
   const cwd = resolve(process.cwd());
   if (existsSync(join(cwd, 'packages', 'runtime', 'src', 'ai-sdk-backend.ts'))) return cwd;
   const fromWorkspace = resolve(cwd, '..', '..');
-  if (existsSync(join(fromWorkspace, 'packages', 'runtime', 'src', 'ai-sdk-backend.ts'))) return fromWorkspace;
+  if (existsSync(join(fromWorkspace, 'packages', 'runtime', 'src', 'ai-sdk-backend.ts')))
+    return fromWorkspace;
   return cwd;
 }
 
@@ -85,7 +86,10 @@ describe('ModelAdapter extraction contract', () => {
     assert.match(backend, /this\.modelAdapter\.resolveModel\(\)/);
     assert.match(backend, /this\.modelAdapter\.startStream\(/);
     assert.match(backend, /this\.modelAdapter\.handleStreamChunk\(/);
-    assert.match(backend, /normalizeAiSdkUsage\(await result\.usage,[\s\S]*?rawFinishReason[\s\S]*?\)/);
+    assert.match(
+      backend,
+      /normalizeAiSdkUsage\(await result\.usage,[\s\S]*?rawFinishReason[\s\S]*?\)/,
+    );
     assert.match(backend, /this\.modelAdapter\.classifyError\(/);
     assert.match(
       backend,
@@ -198,7 +202,12 @@ describe('RunTrace extraction contract', () => {
 
     assert.match(trace, /export class RunTrace/);
     assert.match(trace, /export interface RunTraceEvent/);
-    assert.match(trace, /type RunTracePhase = 'turn' \| 'model' \| 'tool' \| 'permission' \| 'sandbox' \| 'abort' \| 'usage'/);
+    assert.match(
+      trace,
+      // Whitespace-tolerant: the formatter may lay the union out on one line
+      // or one variant per line; the contract is the variant set, not layout.
+      /type RunTracePhase =\s*\|?\s*'turn'\s*\|\s*'model'\s*\|\s*'tool'\s*\|\s*'permission'\s*\|\s*'sandbox'\s*\|\s*'abort'\s*\|\s*'usage'/,
+    );
     assert.doesNotMatch(events, /RunTrace/);
     assert.doesNotMatch(events, /trace_/);
     assert.doesNotMatch(adapter, /RunTrace|recordRunTrace/);
